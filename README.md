@@ -39,7 +39,7 @@ const store = RecordStore.named("employee-store")
 await client.loadStore(store).fromFeed("hr.employees", ReaderStart.beginning(),
   (s, record) => s.upsert(record)                                  // bulk fill, projected
     .withKey(record.key!)
-    .withNamedKey("passport", record.metadata.get("pp") ?? ""));
+    .withNamedKey("passport", record.metadata["pp"] ?? Buffer.alloc(0)));
 
 store.get("emp-1");                    // by primary key
 store.getBy("passport", "P123");       // by named key — non-unique, returns a list
@@ -51,7 +51,8 @@ await sub.close();
 ```
 
 `client.feeds.load(feed, start, sink)` remains the lighter one-shot
-read when you don't need named-key projections.
+read when you don't need named-key projections. See
+[docs/stores.md](docs/stores.md) for the full store guide.
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`
 values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,

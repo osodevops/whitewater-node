@@ -137,3 +137,45 @@ export interface TemporaryFetchPage {
   records: FeedRecord[];
   nextCursor: Cursor | null;
 }
+
+/**
+ * Where a Reader or Subscription starts consuming a Feed — maps to the
+ * WCL `START AT` clause. Build with {@link ReaderStart} factories.
+ */
+export type ReaderStart =
+  | { kind: "beginning" }
+  | { kind: "now" }
+  | { kind: "cursor"; cursor: Cursor }
+  | { kind: "timestamp"; nanos: bigint };
+
+export const ReaderStart = {
+  /** From the oldest retained record. */
+  beginning(): ReaderStart {
+    return { kind: "beginning" };
+  },
+  /** From records appended after creation. */
+  now(): ReaderStart {
+    return { kind: "now" };
+  },
+  /** From an opaque Cursor previously returned by the Riverbed. */
+  cursor(cursor: Cursor): ReaderStart {
+    return { kind: "cursor", cursor };
+  },
+  /** From a signed Unix epoch nanosecond timestamp. */
+  timestampNs(nanos: bigint): ReaderStart {
+    return { kind: "timestamp", nanos };
+  },
+  /** The WCL `START AT` operand, e.g. `BEGINNING`. */
+  wcl(start: ReaderStart): string {
+    switch (start.kind) {
+      case "beginning":
+        return "BEGINNING";
+      case "now":
+        return "NOW";
+      case "cursor":
+        return `CURSOR '${start.cursor.replace(/'/g, "''")}'`;
+      case "timestamp":
+        return `TIMESTAMP ${start.nanos}`;
+    }
+  },
+};

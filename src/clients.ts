@@ -1,5 +1,5 @@
 /**
- * Whitewater client facades: Admin, Writer session, Reader session, and
+ * Whitewater client facades: Writer session, Reader session, and
  * Subscription member — mirroring the conformance fixture operation
  * vocabulary. Every call is async; endpoint round-robining and error
  * classification live in {@link Transport}.
@@ -18,10 +18,12 @@ import type {
   MemberPage,
   ReaderPage,
   ReaderSession,
+  ReaderStart,
   TemporaryFetchOptions,
   TemporaryFetchPage,
   WorkLease,
 } from "./models.js";
+import { ReaderStart as readerStart } from "./models.js";
 import { Transport } from "./transport.js";
 import * as wire from "./wire.js";
 
@@ -31,32 +33,6 @@ export interface AppendInput {
   payload: Buffer;
   eventTimeNs?: bigint | null;
   metadata?: Record<string, Buffer>;
-}
-
-export class AdminClient {
-  constructor(private readonly transport: Transport) {}
-
-  /** Execute a WCL script; returns per-statement results. */
-  async wcl(script: string, requestId = randomUUID()): Promise<ControlExecution> {
-    const body = { request_id: requestId, script };
-    return wire.controlExecution(await this.transport.post("/v1/admin/wcl", body));
-  }
-
-  /** Execute typed control commands, e.g. [{ command: "show", kind: "feeds" }]. */
-  async commands(
-    commands: Array<Record<string, unknown>>,
-    requestId = randomUUID(),
-  ): Promise<ControlExecution> {
-    return wire.controlExecution(
-      await this.transport.post("/v1/admin/commands", { request_id: requestId, commands }),
-    );
-  }
-
-  /** Liveness of the contacted Node. */
-  async healthy(): Promise<boolean> {
-    const health = (await this.transport.get("/health")) as { status?: string };
-    return health?.status === "ok";
-  }
 }
 
 export class WriterSessionClient {
@@ -308,7 +284,6 @@ export interface WhitewaterClientOptions {
 }
 
 export class WhitewaterClient {
-  readonly admin: AdminClient;
   readonly feeds: FeedClient;
   /** Shared transport; exposed for low-level/operator calls not yet
    * covered by a typed facade. */
@@ -316,8 +291,187 @@ export class WhitewaterClient {
 
   constructor(options: WhitewaterClientOptions) {
     this.transport = new Transport(options.endpoints, options.apiKey, options.timeoutMs);
-    this.admin = new AdminClient(this.transport);
     this.feeds = new FeedClient(this.transport);
+  }
+
+  /** Execute a WCL script; returns per-statement results. */
+  async wcl(script: string, requestId = randomUUID()): Promise<ControlExecution> {
+    const body = { request_id: requestId, script };
+    return wire.controlExecution(await this.transport.post("/v1/admin/wcl", body));
+  }
+
+  /** Execute typed control commands, e.g. [{ command: "show", kind: "feeds" }]. */
+  async commands(
+    commands: Array<Record<string, unknown>>,
+    requestId = randomUUID(),
+  ): Promise<ControlExecution> {
+    return wire.controlExecution(
+      await this.transport.post("/v1/admin/commands", { request_id: requestId, commands }),
+    );
+  }
+
+  /** Liveness of the contacted Node. */
+  async healthy(): Promise<boolean> {
+    const health = (await this.transport.get("/health")) as { status?: string };
+    return health?.status === "ok";
+  }
+
+  // ---- Resource management ---------------------------------------------------
+  // Typed convenience over {@link wcl}: each method builds one WCL statement
+  // and executes it. Names are validated before interpolation, so a bad value
+  // fails locally rather than reaching the Control Plane.
+
+  /** `CREATE DOMAIN <name>` */
+  createDomain(name: string): Promise<ControlExecution> {
+    return this.wcl(`CREATE DOMAIN ${dotted(name)}`);
+  }
+
+  /** `CREATE FEED <dotted.name>` */
+  createFeed(name: string): Promise<ControlExecution> {
+    return this.wcl(`CREATE FEED ${dotted(name)}`);
+  }
+
+  /** `CREATE WRITER <name> TO <feed>` */
+  createWriter(name: string, feed: string): Promise<ControlExecution> {
+    return this.wcl(`CREATE WRITER ${resource(name)} TO ${dotted(feed)}`);
+  }
+
+  /** `CREATE READER <name> FROM <feed> [START AT <start>]` (default BEGINNING). */
+  createReader(
+    name: string,
+    feed: string,
+    start: ReaderStart = readerStart.beginning(),
+  ): Promise<ControlExecution> {
+    return this.wcl(
+      `CREATE READER ${resource(name)} FROM ${dotted(feed)} START AT ${readerStart.wcl(start)}`,
+    );
+  }
+
+  /** `CREATE SUBSCRIPTION <name> FROM <feed> [START AT <start>]`. */
+  createSubscription(
+    name: string,
+    feed: string,
+    start: ReaderStart = readerStart.beginning(),
+  ): Promise<ControlExecution> {
+    return this.wcl(
+      `CREATE SUBSCRIPTION ${resource(name)} FROM ${dotted(feed)} START AT ${readerStart.wcl(start)}`,
+    );
+  }
+
+  /** `CREATE ROLE <name>` */
+  createRole(name: string): Promise<ControlExecution> {
+    return this.wcl(`CREATE ROLE ${resource(name)}`);
+  }
+
+  /** `OPEN WRITER SESSION <name>`; the returned epoch feeds {@link writer}. */
+  openWriterSession(writer: string): Promise<ControlExecution> {
+    return this.wcl(`OPEN WRITER SESSION ${resource(writer)}`);
+  }
+
+  /** `SEEK READER <name> TO <start>` — repositions a durable Reader. */
+  seekReader(reader: string, start: ReaderStart): Promise<ControlExecution> {
+    return this.wcl(`SEEK READER ${resource(reader)} TO ${readerStart.wcl(start)}`);
+  }
+
+  /** `DESCRIBE <kind> <name>` */
+  describeDomain(name: string): Promise<ControlExecution> {
+    return this.describe("DOMAIN", name, true);
+  }
+  describeFeed(name: string): Promise<ControlExecution> {
+    return this.describe("FEED", name, true);
+  }
+  describeWriter(name: string): Promise<ControlExecution> {
+    return this.describe("WRITER", name, false);
+  }
+  describeReader(name: string): Promise<ControlExecution> {
+    return this.describe("READER", name, false);
+  }
+  describeSubscription(name: string): Promise<ControlExecution> {
+    return this.describe("SUBSCRIPTION", name, false);
+  }
+  describeRole(name: string): Promise<ControlExecution> {
+    return this.describe("ROLE", name, false);
+  }
+
+  /** `RENAME <kind> <current> TO <new>` — feed/domain names must be dotted. */
+  renameDomain(current: string, renamed: string): Promise<ControlExecution> {
+    return this.rename("DOMAIN", current, renamed, true);
+  }
+  renameFeed(current: string, renamed: string): Promise<ControlExecution> {
+    return this.rename("FEED", current, renamed, true);
+  }
+  renameWriter(current: string, renamed: string): Promise<ControlExecution> {
+    return this.rename("WRITER", current, renamed, false);
+  }
+  renameReader(current: string, renamed: string): Promise<ControlExecution> {
+    return this.rename("READER", current, renamed, false);
+  }
+  renameSubscription(current: string, renamed: string): Promise<ControlExecution> {
+    return this.rename("SUBSCRIPTION", current, renamed, false);
+  }
+  renameRole(current: string, renamed: string): Promise<ControlExecution> {
+    return this.rename("ROLE", current, renamed, false);
+  }
+
+  /** `DROP <kind> <name>` */
+  dropDomain(name: string): Promise<ControlExecution> {
+    return this.drop("DOMAIN", name, true);
+  }
+  dropFeed(name: string): Promise<ControlExecution> {
+    return this.drop("FEED", name, true);
+  }
+  dropWriter(name: string): Promise<ControlExecution> {
+    return this.drop("WRITER", name, false);
+  }
+  dropReader(name: string): Promise<ControlExecution> {
+    return this.drop("READER", name, false);
+  }
+  dropSubscription(name: string): Promise<ControlExecution> {
+    return this.drop("SUBSCRIPTION", name, false);
+  }
+  dropRole(name: string): Promise<ControlExecution> {
+    return this.drop("ROLE", name, false);
+  }
+
+  /** `SHOW <kind>` — rows live in `results[0].data`. */
+  listDomains(): Promise<ControlExecution> {
+    return this.wcl("SHOW DOMAINS");
+  }
+  listFeeds(): Promise<ControlExecution> {
+    return this.wcl("SHOW FEEDS");
+  }
+  listWriters(): Promise<ControlExecution> {
+    return this.wcl("SHOW WRITERS");
+  }
+  listReaders(): Promise<ControlExecution> {
+    return this.wcl("SHOW READERS");
+  }
+  listSubscriptions(): Promise<ControlExecution> {
+    return this.wcl("SHOW SUBSCRIPTIONS");
+  }
+  listRoles(): Promise<ControlExecution> {
+    return this.wcl("SHOW ROLES");
+  }
+  listGrants(): Promise<ControlExecution> {
+    return this.wcl("SHOW GRANTS");
+  }
+
+  private describe(kind: string, name: string, dottedName: boolean): Promise<ControlExecution> {
+    return this.wcl(`DESCRIBE ${kind} ${dottedName ? dotted(name) : resource(name)}`);
+  }
+
+  private rename(
+    kind: string,
+    current: string,
+    renamed: string,
+    dottedName: boolean,
+  ): Promise<ControlExecution> {
+    const check = dottedName ? dotted : resource;
+    return this.wcl(`RENAME ${kind} ${check(current)} TO ${check(renamed)}`);
+  }
+
+  private drop(kind: string, name: string, dottedName: boolean): Promise<ControlExecution> {
+    return this.wcl(`DROP ${kind} ${dottedName ? dotted(name) : resource(name)}`);
   }
 
   writer(name: string, sessionEpoch: number): WriterSessionClient {
@@ -331,4 +485,25 @@ export class WhitewaterClient {
   subscriptionMember(subscription: string): SubscriptionMemberClient {
     return new SubscriptionMemberClient(this.transport, subscription);
   }
+}
+
+/** Lowercase dotted names: `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`, ≤512 bytes. */
+function dotted(name: string): string {
+  if (
+    name.length > 512 ||
+    name.startsWith(".") ||
+    name.endsWith(".") ||
+    !/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$/.test(name)
+  ) {
+    throw new Error(`invalid dotted name: ${name}`);
+  }
+  return name;
+}
+
+/** Single-segment resource names (writers, readers, subscriptions, roles). */
+function resource(name: string): string {
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name)) {
+    throw new Error(`invalid resource name: ${name}`);
+  }
+  return name;
 }

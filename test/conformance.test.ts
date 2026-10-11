@@ -173,7 +173,7 @@ class Runner {
     switch (op) {
       case "wcl": {
         const requestId = typeof args.request_id === "string" ? args.request_id : randomUUID();
-        const r = await client.admin.wcl(String(args.script), requestId);
+        const r = await client.wcl(String(args.script), requestId);
         return {
           request_id: r.requestId,
           revision: r.revision,
@@ -326,7 +326,7 @@ class Runner {
         return {};
       }
       case "admin.commands": {
-        const r = await client.admin.commands(args.commands as Array<Record<string, unknown>>);
+        const r = await client.commands(args.commands as Array<Record<string, unknown>>);
         return {
           request_id: r.requestId,
           revision: r.revision,
@@ -493,7 +493,7 @@ describe.skipIf(!ENABLED)("conformance", () => {
         apiKey: scenario.api_key ?? API_KEY,
         endpoints: (ENDPOINTS as string).split(",").map((e) => e.trim()),
       });
-      expect(await client.admin.healthy()).toBe(true);
+      expect(await client.healthy()).toBe(true);
       await new Runner(client).run(fixture);
     });
   }

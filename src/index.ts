@@ -1,5 +1,6 @@
 export {
   AdminClient,
+  FeedClient,
   ReaderSessionClient,
   SubscriptionMemberClient,
   WhitewaterClient,
@@ -20,6 +21,7 @@ export type {
   AppendBatchResult,
   AppendResult,
   ControlExecution,
+  FeedAppend,
   FeedRecord,
   Joined,
   MemberPage,
@@ -27,5 +29,7 @@ export type {
   ReaderSession,
   ServerFeedback,
   StatementResult,
+  TemporaryFetchOptions,
+  TemporaryFetchPage,
   WorkLease,
 } from "./models.js";

@@ -10,11 +10,13 @@ import type {
   AppendResult,
   ControlExecution,
   Cursor,
+  FeedAppend,
   FeedRecord,
   MemberPage,
   ReaderPage,
   ReaderSession,
   ServerFeedback,
+  TemporaryFetchPage,
 } from "./models.js";
 import { Cursor as CursorOf } from "./models.js";
 
@@ -135,6 +137,35 @@ export function controlExecution(node: unknown): ControlExecution {
           };
         })
       : [],
+  };
+}
+
+export function feedAppendRequest(feed: string, record: FeedAppend) {
+  const metadata: Record<string, string> = {};
+  for (const [name, value] of Object.entries(record.metadata ?? {})) {
+    metadata[name] = value.toString("base64");
+  }
+  const body: Record<string, unknown> = {
+    request_id: record.requestId,
+    feed,
+    writer_session_id: record.writerSessionId,
+    writer_epoch: record.writerEpoch,
+    sequence: record.sequence,
+    key_base64: (record.key ?? Buffer.alloc(0)).toString("base64"),
+    payload_base64: record.payload.toString("base64"),
+    metadata_base64: metadata,
+  };
+  if (record.eventTimeNs != null) {
+    body.event_time_ns = record.eventTimeNs.toString();
+  }
+  return body;
+}
+
+export function temporaryFetchPage(node: unknown): TemporaryFetchPage {
+  const n = asObj(node);
+  return {
+    records: records(n.records),
+    nextCursor: CursorOf.of(n.next_cursor == null ? null : str(n.next_cursor)),
   };
 }
 

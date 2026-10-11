@@ -101,3 +101,39 @@ export interface MemberPage {
   positions: Record<string, string>;
   ownershipEpoch: number;
 }
+
+/**
+ * One ad-hoc append for POST /v1/feeds/append: the caller supplies the
+ * writer identity directly instead of holding a named Writer session.
+ * Identical `requestId` retries dedupe server-side.
+ */
+export interface FeedAppend {
+  requestId: string;
+  writerSessionId: string;
+  writerEpoch: number;
+  sequence: number;
+  key: Buffer | null;
+  payload: Buffer;
+  eventTimeNs?: bigint | null;
+  metadata?: Record<string, Buffer>;
+}
+
+/**
+ * Options for an anonymous temporary Reader fetch. `after` continues
+ * after an opaque Cursor; `afterEventTimeNs` seeks by record event time;
+ * `newOnly` positions at the current end without returning history;
+ * `tail` plus `waitMs` long-polls for newly committed records.
+ */
+export interface TemporaryFetchOptions {
+  after?: Cursor | null;
+  limit?: number;
+  newOnly?: boolean;
+  tail?: boolean;
+  waitMs?: number;
+  afterEventTimeNs?: bigint | null;
+}
+
+export interface TemporaryFetchPage {
+  records: FeedRecord[];
+  nextCursor: Cursor | null;
+}

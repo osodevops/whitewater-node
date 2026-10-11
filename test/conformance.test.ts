@@ -325,6 +325,46 @@ class Runner {
           .ack(member, this.leaseOf(args), page);
         return {};
       }
+      case "admin.commands": {
+        const r = await client.admin.commands(args.commands as Array<Record<string, unknown>>);
+        return {
+          request_id: r.requestId,
+          revision: r.revision,
+          authority: r.authority,
+          warning: r.warning,
+          results: r.results,
+        };
+      }
+      case "feed.append": {
+        const r = await client.feeds.append(String(args.feed), {
+          requestId: String(args.request_id),
+          writerSessionId: String(args.writer_session_id),
+          writerEpoch: Number(args.writer_epoch),
+          sequence: Number(args.sequence),
+          key: Runner.bytes(args.key),
+          payload: Runner.bytes(args.payload) as Buffer,
+          eventTimeNs: args.event_time_ns != null ? BigInt(String(args.event_time_ns)) : null,
+          metadata: this.metadata(args.metadata),
+        });
+        return {
+          message_id: r.messageId,
+          cursor: r.cursor,
+          deduplicated: r.deduplicated,
+          feedback: { hot_key: r.feedback.hotKey },
+        };
+      }
+      case "reader.temporary_fetch": {
+        const p = await client.feeds.temporaryFetch(String(args.feed), {
+          after: args.after != null ? Cursor.of(String(args.after)) : null,
+          limit: args.limit != null ? Number(args.limit) : undefined,
+          newOnly: Boolean(args.new_only),
+          tail: Boolean(args.tail),
+          waitMs: args.wait_ms != null ? Number(args.wait_ms) : undefined,
+          afterEventTimeNs:
+            args.after_event_time_ns != null ? BigInt(String(args.after_event_time_ns)) : null,
+        });
+        return { records: p.records, next_cursor: p.nextCursor };
+      }
       case "feed.records": {
         let path = "/v1/feeds/records?feed=" + String(args.feed);
         if (args.limit != null) path += "&limit=" + String(args.limit);
@@ -349,9 +389,14 @@ class Runner {
   // ---- expectations ----
 
   checkExpect(expectation: Json, result: unknown) {
-    if (expectation.error_code != null) {
-      expect(this.lastError, `expected error ${expectation.error_code}`).not.toBeNull();
-      expect(this.lastError!.code).toBe(expectation.error_code);
+    if (expectation.error_code != null || expectation.error_status != null) {
+      expect(this.lastError, `expected error ${JSON.stringify(expectation)}`).not.toBeNull();
+      if (expectation.error_code != null) {
+        expect(this.lastError!.code).toBe(expectation.error_code);
+      }
+      if (expectation.error_status != null) {
+        expect(this.lastError!.status).toBe(expectation.error_status);
+      }
       return;
     }
     if (this.lastError) {
@@ -443,8 +488,9 @@ class Runner {
 describe.skipIf(!ENABLED)("conformance", () => {
   for (const fixture of FIXTURES) {
     it(fixture.split(/[\\/]/).pop()!, async () => {
+      const scenario = JSON.parse(readFileSync(fixture, "utf-8")) as { api_key?: string };
       const client = new WhitewaterClient({
-        apiKey: API_KEY,
+        apiKey: scenario.api_key ?? API_KEY,
         endpoints: (ENDPOINTS as string).split(",").map((e) => e.trim()),
       });
       expect(await client.admin.healthy()).toBe(true);

@@ -12,10 +12,14 @@ import type {
   AppendResult,
   ControlExecution,
   Cursor,
+  FeedAppend,
+  FeedRecord,
   Joined,
   MemberPage,
   ReaderPage,
   ReaderSession,
+  TemporaryFetchOptions,
+  TemporaryFetchPage,
   WorkLease,
 } from "./models.js";
 import { Transport } from "./transport.js";
@@ -36,6 +40,16 @@ export class AdminClient {
   async wcl(script: string, requestId = randomUUID()): Promise<ControlExecution> {
     const body = { request_id: requestId, script };
     return wire.controlExecution(await this.transport.post("/v1/admin/wcl", body));
+  }
+
+  /** Execute typed control commands, e.g. [{ command: "show", kind: "feeds" }]. */
+  async commands(
+    commands: Array<Record<string, unknown>>,
+    requestId = randomUUID(),
+  ): Promise<ControlExecution> {
+    return wire.controlExecution(
+      await this.transport.post("/v1/admin/commands", { request_id: requestId, commands }),
+    );
   }
 
   /** Liveness of the contacted Node. */
@@ -237,6 +251,56 @@ export class SubscriptionMemberClient {
   }
 }
 
+/**
+ * Ad-hoc Feed operations: committed record reads, anonymous temporary
+ * fetches, and single-shot appends with a caller-supplied writer
+ * identity — no named session required.
+ */
+export class FeedClient {
+  constructor(private readonly transport: Transport) {}
+
+  /** Committed record history via GET /v1/feeds/records. */
+  async records(feed: string, limit?: number, after?: Cursor | null): Promise<FeedRecord[]> {
+    let path = "/v1/feeds/records?feed=" + encodeURIComponent(feed);
+    if (limit != null) {
+      path += "&limit=" + limit;
+    }
+    if (after != null) {
+      path += "&after=" + encodeURIComponent(after);
+    }
+    return wire.records(await this.transport.get(path));
+  }
+
+  /**
+   * Anonymous temporary Reader fetch: bounded page after a Cursor,
+   * `newOnly` positioning, or `tail` + `waitMs` long-poll.
+   */
+  async temporaryFetch(
+    feed: string,
+    options: TemporaryFetchOptions = {},
+  ): Promise<TemporaryFetchPage> {
+    const body: Record<string, unknown> = { feed };
+    if (options.after != null) body.after = options.after;
+    if (options.limit != null) body.limit = options.limit;
+    if (options.newOnly) body.new_only = true;
+    if (options.tail) body.tail = true;
+    if (options.waitMs != null) body.wait_ms = options.waitMs;
+    if (options.afterEventTimeNs != null) {
+      body.after_event_time_ns = options.afterEventTimeNs.toString();
+    }
+    return wire.temporaryFetchPage(
+      await this.transport.post("/v1/readers/temporary/fetch", body),
+    );
+  }
+
+  /** Ad-hoc append; identical `requestId` retries dedupe. */
+  async append(feed: string, record: FeedAppend): Promise<AppendResult> {
+    return wire.appendResult(
+      await this.transport.post("/v1/feeds/append", wire.feedAppendRequest(feed, record)),
+    );
+  }
+}
+
 export interface WhitewaterClientOptions {
   apiKey: string;
   endpoints: string[];
@@ -245,6 +309,7 @@ export interface WhitewaterClientOptions {
 
 export class WhitewaterClient {
   readonly admin: AdminClient;
+  readonly feeds: FeedClient;
   /** Shared transport; exposed for low-level/operator calls not yet
    * covered by a typed facade. */
   readonly transport: Transport;
@@ -252,6 +317,7 @@ export class WhitewaterClient {
   constructor(options: WhitewaterClientOptions) {
     this.transport = new Transport(options.endpoints, options.apiKey, options.timeoutMs);
     this.admin = new AdminClient(this.transport);
+    this.feeds = new FeedClient(this.transport);
   }
 
   writer(name: string, sessionEpoch: number): WriterSessionClient {

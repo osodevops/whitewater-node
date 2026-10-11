@@ -73,6 +73,18 @@ Three shapes, in increasing durability:
    `open` → `fetch` → `ack(deliveredCursor)` → `close`. Progress
    survives restarts.
 
+Two managed wrappers sit on top of those primitives:
+
+- **`feeds.load(feed, start, sink)`** — one-shot bulk read: pages
+  `temporaryFetch` from `ReaderStart` until the frontier is drained.
+  `sink` is a `RecordStore` (a named keyed in-memory map) or any
+  `(records) => void` callback.
+- **`client.subscribe(reader, feed, start, onRecords[, onError])`** — a
+  durable consume loop in the background: provisions the Reader when
+  missing, then `open` → [`fetch` → `onRecords` → `ack`] → `close`.
+  Transient errors retry; `StaleSession` and hard refusals terminate via
+  `onError`/`subscription.failure`. `await sub.close()` stops it.
+
 `client.subscriptionMember(sub)` is the lease vocabulary for
 cooperating consumers: `join` → `claim`/`renew`/`release` → `fetch` →
 `ack`.

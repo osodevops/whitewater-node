@@ -29,6 +29,16 @@ const client = new WhitewaterClient({
 | `client.writer(name, epoch)` | Idempotent single and batch appends (`requestId` dedup) |
 | `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
 | `client.subscriptionMember(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
+| `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`waitMs`/`newOnly`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
+| `client.subscribe(reader, feed, start, onRecords)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack in the background; `await sub.close()` to stop. `RecordStore` is a ready-made keyed sink |
+
+```ts
+const store = RecordStore.named("employee-store");
+await client.feeds.load("hr.employees", ReaderStart.beginning(), store); // bulk fill
+const sub = client.subscribe("hr-view", "hr.employees", ReaderStart.now(),
+  (records) => store.putAll(records));                                    // keep it warm
+await sub.close();
+```
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`
 values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,

@@ -5,7 +5,11 @@ import { ReaderStart, WhitewaterClient } from "../dist/index.js";
  * Riverbed, so progress survives client restarts — the "subscribe"
  * pattern for applications, versus the ephemeral tail in tail-feed.mjs.
  *
- * The loop is explicit — Whitewater Readers pull rather than push:
+ * For a managed loop — auto-provisioning, retry policy, and a
+ * close()-able handle — use client.subscribe(...) instead of this
+ * explicit form.
+ *
+ * The loop below is explicit — Whitewater Readers pull rather than push:
  *
  *   open → [ fetch → process → ack ] → close
  *

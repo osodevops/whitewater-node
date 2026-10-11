@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { Conflict } from "./errors.js";
+import { AmbiguousResult, Conflict, Unavailable, WhitewaterError } from "./errors.js";
 import type {
   AppendBatchResult,
   AppendResult,
@@ -23,7 +23,7 @@ import type {
   TemporaryFetchPage,
   WorkLease,
 } from "./models.js";
-import { ReaderStart as readerStart } from "./models.js";
+import { ReaderStart as readerStart, RecordStore } from "./models.js";
 import { Transport } from "./transport.js";
 import * as wire from "./wire.js";
 
@@ -275,6 +275,169 @@ export class FeedClient {
       await this.transport.post("/v1/feeds/append", wire.feedAppendRequest(feed, record)),
     );
   }
+
+  /**
+   * Bulk-read committed Feed history once, from `start`, delivering each
+   * page to `sink` until the current frontier is drained. Returns the
+   * number of records delivered. Use {@link WhitewaterClient.subscribe}
+   * when the sink should keep receiving.
+   *
+   * `ReaderStart.now()` loads nothing (the frontier is empty at call
+   * time); `cursor`/`timestampNs` resume from that point.
+   */
+  async load(
+    feed: string,
+    start: ReaderStart,
+    sink: RecordStore | ((records: FeedRecord[]) => void | Promise<void>),
+  ): Promise<number> {
+    const deliver =
+      typeof sink === "function"
+        ? sink
+        : (records: FeedRecord[]) => sink.putAll(records);
+    let options = loadFirstPage(start);
+    let loaded = 0;
+    for (;;) {
+      const page = await this.temporaryFetch(feed, options);
+      if (page.records.length === 0) return loaded;
+      await deliver(page.records);
+      loaded += page.records.length;
+      options = { after: page.nextCursor, limit: LOAD_PAGE };
+    }
+  }
+}
+
+const LOAD_PAGE = 512;
+
+function loadFirstPage(start: ReaderStart): TemporaryFetchOptions {
+  switch (start.kind) {
+    case "beginning":
+      return { limit: LOAD_PAGE };
+    case "now":
+      return { newOnly: true };
+    case "cursor":
+      return { after: start.cursor, limit: LOAD_PAGE };
+    case "timestamp":
+      return { afterEventTimeNs: start.nanos, limit: LOAD_PAGE };
+  }
+}
+
+/**
+ * A running feed subscription: a named Reader session polled in the
+ * background, invoking `onRecords` per fetched page and acknowledging
+ * durable progress after each delivered batch.
+ *
+ * Error policy: transient refusals ({@link Unavailable},
+ * {@link AmbiguousResult}) retry after a short pause. {@link StaleSession}
+ * — another client opened the same Reader — terminates the subscription
+ * rather than fencing back. Any other failure also terminates. Terminal
+ * errors reach `onError` and surface on {@link failure}.
+ */
+export class Subscription {
+  private stopped = false;
+  private readonly done: Promise<void>;
+  private _failure?: WhitewaterError;
+
+  constructor(
+    private readonly client: WhitewaterClient,
+    private readonly readerName: string,
+    private readonly feed: string,
+    private readonly start: ReaderStart,
+    private readonly capacity: number,
+    private readonly onRecords: (records: FeedRecord[]) => void | Promise<void>,
+    private readonly onError?: (error: WhitewaterError) => void,
+  ) {
+    this.done = this.run();
+  }
+
+  /** False once the loop has exited (closed or failed). */
+  get running(): boolean {
+    return !this.stopped;
+  }
+
+  /** The terminal error, when the loop stopped on a failure. */
+  get failure(): WhitewaterError | undefined {
+    return this._failure;
+  }
+
+  /** Signal stop, release the Reader session, and await the loop. */
+  async close(): Promise<void> {
+    this.stopped = true;
+    await this.done;
+  }
+
+  private async run(): Promise<void> {
+    try {
+      await this.ensureReader();
+      const reader = this.client.reader(this.readerName);
+      let session = await this.openWithRetry(reader);
+      if (session === null) return;
+      try {
+        while (!this.stopped) {
+          try {
+            const page = await reader.fetch(session, this.capacity);
+            if (page.records.length > 0) {
+              await this.onRecords(page.records);
+              if (page.deliveredCursor != null) {
+                session = await reader.ack(session, page.deliveredCursor);
+              }
+            } else {
+              await sleep(EMPTY_POLL_MS);
+            }
+          } catch (error) {
+            if (!isRetryable(error)) throw error;
+            await sleep(RETRY_MS);
+          }
+        }
+      } finally {
+        try {
+          await reader.close(session);
+        } catch {
+          // Session may already be superseded; release is best-effort.
+        }
+      }
+    } catch (error) {
+      if (!this.stopped && error instanceof WhitewaterError) {
+        this._failure = error;
+        this.onError?.(error);
+      }
+    } finally {
+      this.stopped = true;
+    }
+  }
+
+  /** Declare the Reader when missing; an existing Reader is reused as-is. */
+  private async ensureReader(): Promise<void> {
+    try {
+      await this.client.createReader(this.readerName, this.feed, this.start);
+    } catch (error) {
+      if (!(error instanceof WhitewaterError && error.message.includes("exists"))) {
+        throw error;
+      }
+    }
+  }
+
+  private async openWithRetry(reader: ReaderSessionClient): Promise<ReaderSession | null> {
+    while (!this.stopped) {
+      try {
+        return await reader.open(this.capacity);
+      } catch (error) {
+        if (!isRetryable(error)) throw error;
+        await sleep(RETRY_MS);
+      }
+    }
+    return null;
+  }
+}
+
+const EMPTY_POLL_MS = 250;
+const RETRY_MS = 1_000;
+
+function isRetryable(error: unknown): boolean {
+  return error instanceof Unavailable || error instanceof AmbiguousResult;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export interface WhitewaterClientOptions {
@@ -485,7 +648,42 @@ export class WhitewaterClient {
   subscriptionMember(subscription: string): SubscriptionMemberClient {
     return new SubscriptionMemberClient(this.transport, subscription);
   }
+
+  /**
+   * Subscribe durably to a Feed: ensures a Reader named `reader` exists
+   * (creating it at `start` when missing), opens a session, and invokes
+   * `onRecords` per fetched page in the background, acknowledging after
+   * each batch. The returned {@link Subscription} runs until `close()`;
+   * terminal errors reach `onError` and `subscription.failure`.
+   *
+   * ```ts
+   * const store = RecordStore.named("employee-store");
+   * const sub = client.subscribe("hr-view", "hr.employees",
+   *   ReaderStart.beginning(), (records) => store.putAll(records));
+   * // ...later
+   * await sub.close();
+   * ```
+   */
+  subscribe(
+    reader: string,
+    feed: string,
+    start: ReaderStart,
+    onRecords: (records: FeedRecord[]) => void | Promise<void>,
+    onError?: (error: WhitewaterError) => void,
+  ): Subscription {
+    return new Subscription(
+      this,
+      reader,
+      feed,
+      start,
+      SUBSCRIBE_CAPACITY,
+      onRecords,
+      onError,
+    );
+  }
 }
+
+const SUBSCRIBE_CAPACITY = 128;
 
 /** Lowercase dotted names: `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`, ≤512 bytes. */
 function dotted(name: string): string {

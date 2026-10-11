@@ -1,6 +1,7 @@
 export {
   FeedClient,
   ReaderSessionClient,
+  Subscription,
   SubscriptionMemberClient,
   WhitewaterClient,
   WriterSessionClient,
@@ -15,7 +16,7 @@ export {
   Unavailable,
   WhitewaterError,
 } from "./errors.js";
-export { Cursor, ReaderStart } from "./models.js";
+export { Cursor, ReaderStart, RecordStore } from "./models.js";
 export type {
   AppendBatchResult,
   AppendResult,

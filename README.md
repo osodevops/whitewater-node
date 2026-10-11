@@ -33,12 +33,25 @@ const client = new WhitewaterClient({
 | `client.subscribe(reader, feed, start, onRecords)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack in the background; `await sub.close()` to stop. `RecordStore` is a ready-made keyed sink |
 
 ```ts
-const store = RecordStore.named("employee-store");
-await client.feeds.load("hr.employees", ReaderStart.beginning(), store); // bulk fill
+const store = RecordStore.named("employee-store")
+  .addKey("passport").addKey("department");                        // up to 10 named keys
+
+await client.loadStore(store).fromFeed("hr.employees", ReaderStart.beginning(),
+  (s, record) => s.upsert(record)                                  // bulk fill, projected
+    .withKey(record.key!)
+    .withNamedKey("passport", record.metadata.get("pp") ?? ""));
+
+store.get("emp-1");                    // by primary key
+store.getBy("passport", "P123");       // by named key — non-unique, returns a list
+await store.forEachParallel(3, async (entry) => export(entry.record));
+
 const sub = client.subscribe("hr-view", "hr.employees", ReaderStart.now(),
   (records) => store.putAll(records));                                    // keep it warm
 await sub.close();
 ```
+
+`client.feeds.load(feed, start, sink)` remains the lighter one-shot
+read when you don't need named-key projections.
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`
 values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,

@@ -77,8 +77,14 @@ Two managed wrappers sit on top of those primitives:
 
 - **`feeds.load(feed, start, sink)`** — one-shot bulk read: pages
   `temporaryFetch` from `ReaderStart` until the frontier is drained.
-  `sink` is a `RecordStore` (a named keyed in-memory map) or any
-  `(records) => void` callback.
+  `sink` is a `RecordStore` or any `(records) => void` callback.
+- **`client.loadStore(store).fromFeed(feed, start, projection)`** — the
+  same bulk read with a per-record projection: `RecordStore` declares up
+  to 10 named secondary keys (`addKey`), and the callback writes each
+  row via `store.upsert(record).withKey(k).withNamedKey(n, v)`. Store
+  ops: `get(key)`, `getBy(namedKey, value)` (non-unique — returns a
+  list), `delete`, `clear`, `copy(target)`, `forEach`,
+  `forEachParallel(concurrency, fn)` — async fan-out, not CPU threads.
 - **`client.subscribe(reader, feed, start, onRecords[, onError])`** — a
   durable consume loop in the background: provisions the Reader when
   missing, then `open` → [`fetch` → `onRecords` → `ack`] → `close`.

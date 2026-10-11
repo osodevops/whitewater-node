@@ -681,6 +681,50 @@ export class WhitewaterClient {
       onError,
     );
   }
+
+  /**
+   * Bulk materialization of Feed history into a {@link RecordStore}: the
+   * `fromFeed` projection callback picks each row's primary key and
+   * named-key values via `store.upsert(record)`:
+   *
+   * ```ts
+   * const store = RecordStore.named("employee-store").addKey("passport");
+   * const loaded = await client.loadStore(store).fromFeed("hr.employees",
+   *   ReaderStart.beginning(),
+   *   (s, record) => s.upsert(record)
+   *     .withKey(record.key ?? Buffer.alloc(0))
+   *     .withNamedKey("passport", record.metadata.get("pp") ?? ""));
+   * ```
+   */
+  loadStore(store: RecordStore): LoadStoreBuilder {
+    return new LoadStoreBuilder(this, store);
+  }
+}
+
+/** The {@link WhitewaterClient.loadStore} operation builder. */
+export class LoadStoreBuilder {
+  /** @internal */
+  constructor(
+    private readonly client: WhitewaterClient,
+    private readonly store: RecordStore,
+  ) {}
+
+  /**
+   * Read committed history of `feed` from `start`, invoking `projection`
+   * per record until the frontier is drained; resolves to the number of
+   * records loaded.
+   */
+  async fromFeed(
+    feed: string,
+    start: ReaderStart,
+    projection: (store: RecordStore, record: FeedRecord) => void | Promise<void>,
+  ): Promise<number> {
+    return this.client.feeds.load(feed, start, async (records) => {
+      for (const record of records) {
+        await projection(this.store, record);
+      }
+    });
+  }
 }
 
 const SUBSCRIBE_CAPACITY = 128;

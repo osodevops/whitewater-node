@@ -7,6 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 import { AmbiguousResult, Conflict, Unavailable, WhitewaterError } from "./errors.js";
+import { MAX_NAMED_KEYS } from "./models.js";
 import type {
   AppendBatchResult,
   AppendResult,
@@ -16,14 +17,20 @@ import type {
   FeedRecord,
   Joined,
   MemberPage,
+  MutationResult,
+  NamedKey,
   ReaderPage,
   ReaderSession,
   ReaderStart,
+  StorePage,
+  StoreRow,
+  StoreRows,
+  StoreValue,
   TemporaryFetchOptions,
   TemporaryFetchPage,
   WorkLease,
 } from "./models.js";
-import { ReaderStart as readerStart, RecordStore } from "./models.js";
+import { ReaderStart as readerStart } from "./models.js";
 import { Transport } from "./transport.js";
 import * as wire from "./wire.js";
 
@@ -288,12 +295,9 @@ export class FeedClient {
   async load(
     feed: string,
     start: ReaderStart,
-    sink: RecordStore | ((records: FeedRecord[]) => void | Promise<void>),
+    sink: (records: FeedRecord[]) => void | Promise<void>,
   ): Promise<number> {
-    const deliver =
-      typeof sink === "function"
-        ? sink
-        : (records: FeedRecord[]) => sink.putAll(records);
+    const deliver = sink;
     let options = loadFirstPage(start);
     let loaded = 0;
     for (;;) {
@@ -452,9 +456,12 @@ export class WhitewaterClient {
    * covered by a typed facade. */
   readonly transport: Transport;
 
+  readonly stateStores: StateStoresClient;
+
   constructor(options: WhitewaterClientOptions) {
     this.transport = new Transport(options.endpoints, options.apiKey, options.timeoutMs);
     this.feeds = new FeedClient(this.transport);
+    this.stateStores = new StateStoresClient(this.transport);
   }
 
   /** Execute a WCL script; returns per-statement results. */
@@ -657,9 +664,8 @@ export class WhitewaterClient {
    * terminal errors reach `onError` and `subscription.failure`.
    *
    * ```ts
-   * const store = RecordStore.named("employee-store");
    * const sub = client.subscribe("hr-view", "hr.employees",
-   *   ReaderStart.beginning(), (records) => store.putAll(records));
+   *   ReaderStart.beginning(), (records) => handle(records));
    * // ...later
    * await sub.close();
    * ```
@@ -683,47 +689,258 @@ export class WhitewaterClient {
   }
 
   /**
-   * Bulk materialization of Feed history into a {@link RecordStore}: the
-   * `fromFeed` projection callback picks each row's primary key and
-   * named-key values via `store.upsert(record)`:
-   *
-   * ```ts
-   * const store = RecordStore.named("employee-store").addKey("passport");
-   * const loaded = await client.loadStore(store).fromFeed("hr.employees",
-   *   ReaderStart.beginning(),
-   *   (s, record) => s.upsert(record)
-   *     .withKey(record.key ?? Buffer.alloc(0))
-   *     .withNamedKey("passport", record.metadata.get("pp") ?? ""));
-   * ```
+   * A thin facade over the node-side StateStore `name` — rows live on
+   * the Nodes (RF3 + Fjall); this client holds no state.
    */
-  loadStore(store: RecordStore): LoadStoreBuilder {
-    return new LoadStoreBuilder(this, store);
+  stateStore(name: string): StateStore {
+    return StateStore.bound(this.transport, name);
   }
 }
 
-/** The {@link WhitewaterClient.loadStore} operation builder. */
-export class LoadStoreBuilder {
-  /** @internal */
-  constructor(
-    private readonly client: WhitewaterClient,
-    private readonly store: RecordStore,
+/**
+ * A thin facade over one node-side StateStore — the durable RF3 + Fjall
+ * store on the Nodes is the only store; this object holds no rows.
+ * Declare it with named keys, then put/get/delete/iterate:
+ *
+ * ```ts
+ * const spec = StateStore.named("accounts.employees")
+ *   .addKey("passport", true).addKey("department", false);
+ * const store = await client.stateStores.define(spec);
+ *
+ * await store.put(Buffer.from("user-1"), Buffer.from("profile-1"),
+ *   { passport: "P111", department: "eng" });
+ * const row = await store.get(Buffer.from("user-1"));       // StoreRow | null
+ * const rows = await store.getBy("department", "eng");      // every match
+ * for await (const r of store.iterate()) { }                // key-ordered pages
+ * await store.clear();
+ * ```
+ *
+ * `addKey` records declaration intent used by `define`; it does not
+ * mutate an already-declared store (named keys are declared at
+ * creation). Named values are typed scalars — string, number/bigint,
+ * boolean, Buffer, or null; an array value carries one typed value per
+ * posting component.
+ */
+export class StateStore {
+  /** Named secondary keys per store; matches the server declaration budget. */
+  static readonly MAX_NAMED_KEYS = MAX_NAMED_KEYS;
+
+  private readonly declaredKeys: NamedKey[] = [];
+
+  private constructor(
+    private transport: Transport | null,
+    readonly name: string,
   ) {}
 
+  /** An unbound declaration spec for {@link StateStoresClient.define}. */
+  static named(name: string): StateStore {
+    return new StateStore(null, dotted(name));
+  }
+
+  /** @internal */
+  static bound(transport: Transport, name: string): StateStore {
+    return new StateStore(transport, dotted(name));
+  }
+
+  /** Declare a named secondary key for `define` (at most MAX_NAMED_KEYS). */
+  addKey(namedKey: string, unique = false): this {
+    if (!namedKey || !namedKey.trim()) throw new Error("named key is required");
+    if (this.declaredKeys.some((k) => k.name === namedKey)) {
+      throw new Error(`duplicate named key: ${namedKey}`);
+    }
+    if (this.declaredKeys.length >= StateStore.MAX_NAMED_KEYS) {
+      throw new Error(`a StateStore declares at most ${StateStore.MAX_NAMED_KEYS} named keys`);
+    }
+    this.declaredKeys.push({ name: namedKey, unique });
+    return this;
+  }
+
+  get namedKeys(): NamedKey[] {
+    return [...this.declaredKeys];
+  }
+
+  private boundTransport(): Transport {
+    if (!this.transport) {
+      throw new Error(
+        "unbound StateStore spec — pass it to client.stateStores.define() " +
+          "or get a bound facade via client.stateStore(name)",
+      );
+    }
+    return this.transport;
+  }
+
+  /** @internal */
+  bind(transport: Transport): this {
+    this.transport = transport;
+    return this;
+  }
+
+  /** Insert or replace one row. `named` maps a declared named key to a
+   * typed value (or an array for multi-component postings). */
+  async put(
+    key: Buffer | string,
+    payload: Buffer | string,
+    named?: Record<string, StoreValue | StoreValue[]>,
+    mutationId = randomUUID(),
+  ): Promise<MutationResult> {
+    const op: Record<string, unknown> = {
+      kind: "put_row",
+      key_base64: keyBytes(key).toString("base64"),
+      payload_base64: keyBytes(payload).toString("base64"),
+    };
+    if (named && Object.keys(named).length > 0) op.named = wire.namedValues(named);
+    return wire.mutationResult(
+      await this.boundTransport().post("/v1/state-stores/mutate", {
+        store: this.name,
+        mutation_id: mutationId,
+        op,
+      }),
+    );
+  }
+
+  /** Primary-key read with freshness evidence on the returned row; null
+   * when absent. `strict` bounded-waits for the serving replica to apply
+   * its committed frontier rather than answering stale. */
+  async get(
+    key: Buffer | string,
+    options: { strict?: boolean; waitMs?: number } = {},
+  ): Promise<StoreRow | null> {
+    const response = (await this.boundTransport().post("/v1/state-stores/lookup", {
+      store: this.name,
+      key_base64: keyBytes(key).toString("base64"),
+      strict: options.strict ?? false,
+      ...(options.waitMs != null ? { wait_ms: options.waitMs } : {}),
+    })) as Record<string, unknown>;
+    if (response.found !== true) return null;
+    const row: StoreRow = {
+      key: keyBytes(key),
+      payload: Buffer.from(String(response.payload_base64 ?? ""), "base64"),
+      freshness: wire.storeFreshness(response),
+    };
+    if (response.applied_cursor != null) row.appliedCursor = String(response.applied_cursor);
+    return row;
+  }
+
+  /** Named-key lookup: every primary row the value points at, plus the
+   * serving replica's freshness evidence. */
+  async getBy(
+    namedKey: string,
+    value: StoreValue | StoreValue[],
+    options: { limit?: number; strict?: boolean; waitMs?: number } = {},
+  ): Promise<StoreRows> {
+    const values = Array.isArray(value) ? value : [value];
+    return wire.storeRows(
+      await this.boundTransport().post("/v1/state-stores/get-by", {
+        store: this.name,
+        named_key: namedKey,
+        values: values.map(wire.indexValue),
+        strict: options.strict ?? false,
+        ...(options.limit != null ? { limit: options.limit } : {}),
+        ...(options.waitMs != null ? { wait_ms: options.waitMs } : {}),
+      }),
+    );
+  }
+
+  /** Remove the row and its named postings. */
+  async delete(key: Buffer | string, mutationId = randomUUID()): Promise<MutationResult> {
+    return wire.mutationResult(
+      await this.boundTransport().post("/v1/state-stores/mutate", {
+        store: this.name,
+        mutation_id: mutationId,
+        op: { kind: "delete_row", key_base64: keyBytes(key).toString("base64") },
+      }),
+    );
+  }
+
+  /** One bounded iteration page in primary-key order — the same row set
+   * replica transfer serves, pinned to `pinnedSeq`. */
+  async page(afterKey?: Buffer, limit?: number): Promise<StorePage> {
+    return wire.storePage(
+      await this.boundTransport().post("/v1/state-stores/iterate", {
+        store: this.name,
+        ...(afterKey ? { after_key_base64: afterKey.toString("base64") } : {}),
+        ...(limit != null ? { limit } : {}),
+      }),
+    );
+  }
+
+  /** Async-iterate every row in primary-key order across bounded pages. */
+  async *iterate(limit?: number): AsyncGenerator<StoreRow> {
+    let after: Buffer | undefined;
+    for (;;) {
+      const page = await this.page(after, limit);
+      for (const row of page.rows) yield row;
+      if (!page.nextKey) return;
+      after = page.nextKey;
+    }
+  }
+
+  /** Empty the store as one journaled mutation — durable and idempotent
+   * under `mutationId` retries. */
+  async clear(mutationId = randomUUID()): Promise<MutationResult> {
+    return wire.mutationResult(
+      await this.boundTransport().post("/v1/state-stores/clear", {
+        store: this.name,
+        mutation_id: mutationId,
+      }),
+    );
+  }
+
+  /** Tombstone the store: the name cannot be recreated and every data
+   * path refuses. Applied rows remain on replicas until reclaim. */
+  async drop(requestId?: string): Promise<ControlExecution> {
+    return wire.controlExecution(
+      await this.boundTransport().post("/v1/admin/commands", {
+        ...(requestId ? { request_id: requestId } : {}),
+        commands: [{ command: "drop", kind: "state_store", name: this.name }],
+      }),
+    );
+  }
+}
+
+function keyBytes(value: Buffer | string): Buffer {
+  return typeof value === "string" ? Buffer.from(value, "utf8") : value;
+}
+
+/** Collection-level StateStore operations: declaration and drop. Row
+ * operations live on the bound {@link StateStore} facade returned by
+ * `client.stateStore(name)`. */
+export class StateStoresClient {
+  constructor(private readonly transport: Transport) {}
+
   /**
-   * Read committed history of `feed` from `start`, invoking `projection`
-   * per record until the frontier is drained; resolves to the number of
-   * records loaded.
+   * Declare `spec` on the Control Plane and return it bound to this
+   * client. `source` names a same-Domain Feed the store materializes
+   * from; omitted means a manual store (required when the spec declares
+   * named keys).
    */
-  async fromFeed(
-    feed: string,
-    start: ReaderStart,
-    projection: (store: RecordStore, record: FeedRecord) => void | Promise<void>,
-  ): Promise<number> {
-    return this.client.feeds.load(feed, start, async (records) => {
-      for (const record of records) {
-        await projection(this.store, record);
-      }
+  async define(spec: StateStore, source?: string, requestId?: string): Promise<StateStore> {
+    if (!(spec instanceof StateStore)) {
+      throw new Error("define() takes a StateStore spec — use StateStore.named(name)");
+    }
+    if (spec.namedKeys.length > 0 && source) {
+      throw new Error(
+        "named keys require a manual StateStore until a declared " +
+          "source-Feed projection exists",
+      );
+    }
+    await this.transport.post("/v1/admin/commands", {
+      ...(requestId ? { request_id: requestId } : {}),
+      commands: [
+        {
+          command: "define_state_store",
+          name: spec.name,
+          source: source ? { kind: "feed", feed: dotted(source) } : { kind: "manual" },
+          named_keys: spec.namedKeys.map((k) => ({ name: k.name, unique: k.unique })),
+        },
+      ],
     });
+    return spec.bind(this.transport);
+  }
+
+  /** Tombstone the named store. */
+  async drop(name: string, requestId?: string): Promise<ControlExecution> {
+    return StateStore.bound(this.transport, name).drop(requestId);
   }
 }
 

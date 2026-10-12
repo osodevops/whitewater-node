@@ -13,9 +13,15 @@ import type {
   FeedAppend,
   FeedRecord,
   MemberPage,
+  MutationResult,
   ReaderPage,
   ReaderSession,
   ServerFeedback,
+  StoreFreshness,
+  StorePage,
+  StoreRow,
+  StoreRows,
+  StoreValue,
   TemporaryFetchPage,
 } from "./models.js";
 import { Cursor as CursorOf } from "./models.js";
@@ -180,5 +186,88 @@ export function memberPage(node: unknown): MemberPage {
     cursor: CursorOf.of(n.cursor == null ? null : str(n.cursor)),
     positions,
     ownershipEpoch: Number(n.ownership_epoch ?? 0),
+  };
+}
+
+/** One typed StateStore/Index value for the wire; `bigint` narrows to
+ * i64, `number` must be a safe integer. */
+export function indexValue(value: StoreValue): Json {
+  if (value === null || value === undefined) return { kind: "null" };
+  if (typeof value === "boolean") return { kind: "bool", value };
+  if (typeof value === "bigint") {
+    if (value > BigInt("9223372036854775807") || value < BigInt("-9223372036854775808")) {
+      throw new Error("StateStore i64 value overflows");
+    }
+    const narrowed = Number(value);
+    if (!Number.isSafeInteger(narrowed)) {
+      throw new Error("StateStore i64 bigint must fit a safe integer on the wire");
+    }
+    return { kind: "i64", value: narrowed };
+  }
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw new Error("StateStore number values must be safe integers");
+    return { kind: "i64", value };
+  }
+  if (typeof value === "string") return { kind: "text", value };
+  if (Buffer.isBuffer(value)) return { kind: "bytes", value_base64: value.toString("base64") };
+  throw new Error(`unsupported StateStore value type: ${typeof value}`);
+}
+
+/** `{ department: "eng", composite: [v1, v2] }` -> the mutation's named entries. */
+export function namedValues(named: Record<string, StoreValue | StoreValue[]>): Json[] {
+  return Object.entries(named).map(([name, value]) => ({
+    name,
+    values: (Array.isArray(value) ? value : [value]).map(indexValue),
+  }));
+}
+
+export function mutationResult(node: unknown): MutationResult {
+  const n = asObj(node);
+  return {
+    storeId: str(n.store_id),
+    mutationId: str(n.mutation_id),
+    sequence: Number(n.sequence ?? 0),
+    deduplicated: n.deduplicated === true,
+  };
+}
+
+export function storeFreshness(node: Json): StoreFreshness {
+  return {
+    appliedSeq: Number(node.applied_seq ?? 0),
+    committedSeq: Number(node.committed_seq ?? 0),
+    behind: node.behind === true,
+    servedBy: str(node.served_by),
+  };
+}
+
+function storeRow(node: Json, freshness?: StoreFreshness): StoreRow {
+  const row: StoreRow = {
+    key: Buffer.from(str(node.key_base64), "base64"),
+    payload: Buffer.from(str(node.payload_base64), "base64"),
+  };
+  if (node.applied_cursor != null) row.appliedCursor = str(node.applied_cursor);
+  if (freshness) row.freshness = freshness;
+  return row;
+}
+
+export function storeRows(node: unknown): StoreRows {
+  const n = asObj(node);
+  const freshness = storeFreshness(n);
+  const list = Array.isArray(n.rows) ? n.rows : [];
+  return {
+    rows: list.map((item) => storeRow(asObj(item), freshness)),
+    freshness,
+  };
+}
+
+export function storePage(node: unknown): StorePage {
+  const n = asObj(node);
+  const list = Array.isArray(n.rows) ? n.rows : [];
+  const next = n.next_key_base64;
+  return {
+    rows: list.map((item) => storeRow(asObj(item))),
+    nextKey: next == null ? null : Buffer.from(str(next), "base64"),
+    pinnedSeq: Number(n.pinned_seq ?? 0),
+    servedBy: str(n.served_by),
   };
 }

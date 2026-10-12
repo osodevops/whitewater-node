@@ -4,7 +4,6 @@ import { AddressInfo } from "node:net";
 import {
   FeedRecord,
   ReaderStart,
-  RecordStore,
   StaleSession,
   WhitewaterClient,
 } from "../src/index.js";
@@ -113,19 +112,18 @@ describe("subscribe + load", () => {
     expect(predicate()).toBe(true);
   };
 
-  it("load pages until empty and fills the store", async () => {
+  it("load pages until empty and delivers every record", async () => {
     temporaryPages.push(temporaryPage("c1", "r1"), temporaryPage("c2", "r2"));
 
-    const store = RecordStore.named("employee-store");
+    const sink: FeedRecord[][] = [];
     const loaded = await client.feeds.load(
       "hr.employees",
       ReaderStart.beginning(),
-      store,
+      (records) => sink.push(records),
     );
 
     expect(loaded).toBe(2);
-    expect(store.size).toBe(2);
-    expect(store.get(Buffer.from("k-r1"))?.cursor).toBe("r1");
+    expect(sink.flat().map((r) => r.cursor)).toEqual(["r1", "r2"]);
     const bodies = temporaryBodies();
     expect(bodies.length).toBe(3);
     expect(bodies[0].after).toBeUndefined();
@@ -215,48 +213,4 @@ describe("subscribe + load", () => {
     expect(errors[0]).toBeInstanceOf(StaleSession);
   });
 
-  it("named keys index rows non-uniquely and delete cleans postings", async () => {
-    temporaryPages.push(temporaryPage("c2", "r1", "r2"), temporaryPage(null));
-    const store = RecordStore.named("employee-store").addKey("department");
-    await client.loadStore(store).fromFeed(
-      "hr.employees",
-      ReaderStart.beginning(),
-      (s, r) => s.upsert(r).withKey(r.key!).withNamedKey("department", "eng"),
-    );
-
-    expect(store.getBy("department", "eng").length).toBe(2);
-    expect(store.get("k-r1")?.cursor).toBe("r1");
-    expect(() => store.getBy("undeclared", "x")).toThrow("undeclared named key");
-
-    expect(store.delete("k-r1")).toBe(true);
-    expect(store.getBy("department", "eng").length).toBe(1);
-
-    store.clear();
-    expect(store.size).toBe(0);
-    expect(store.getBy("department", "eng").length).toBe(0);
-  });
-
-  it("copy carries named postings and forEachParallel visits every row", async () => {
-    temporaryPages.push(temporaryPage("c2", "r1", "r2"), temporaryPage(null));
-    const store = RecordStore.named("src").addKey("team");
-    await client.loadStore(store).fromFeed(
-      "hr.employees",
-      ReaderStart.beginning(),
-      (s, r) => s.upsert(r).withKey(r.key!).withNamedKey("team", r.cursor),
-    );
-
-    const target = RecordStore.named("dst");
-    store.copy(target);
-    expect(target.size).toBe(2);
-    expect(target.namedKeys()).toEqual(["team"]);
-    expect(target.getBy("team", "r1").length).toBe(1);
-
-    let seen = 0;
-    await store.forEachParallel(3, async (entry) => {
-      expect(entry.primaryKey.length).toBeGreaterThan(0);
-      expect(entry.record.cursor).toBeTruthy();
-      seen += 1;
-    });
-    expect(seen).toBe(2);
-  });
 });

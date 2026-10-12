@@ -30,28 +30,21 @@ const client = new WhitewaterClient({
 | `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
 | `client.subscriptionMember(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
 | `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`waitMs`/`newOnly`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
-| `client.subscribe(reader, feed, start, onRecords)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack in the background; `await sub.close()` to stop. `RecordStore` is a ready-made keyed sink |
+| `client.subscribe(reader, feed, start, onRecords)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack in the background; `await sub.close()` to stop |
+| `client.stateStore(name)` / `client.stateStores` | Server-side StateStore facade — durable RF3 rows on the Nodes: `put`/`get`/`getBy` (named keys)/`iterate`/`delete`/`clear`/`drop`, plus `define` for declaration |
 
 ```ts
-const store = RecordStore.named("employee-store")
-  .addKey("passport").addKey("department");                        // up to 10 named keys
+const spec = StateStore.named("accounts.employees")
+  .addKey("passport", true).addKey("department", false);           // up to 10 named keys
+const store = await client.stateStores.define(spec);               // durable store on the Nodes
 
-await client.loadStore(store).fromFeed("hr.employees", ReaderStart.beginning(),
-  (s, record) => s.upsert(record)                                  // bulk fill, projected
-    .withKey(record.key!)
-    .withNamedKey("passport", record.metadata["pp"] ?? Buffer.alloc(0)));
-
-store.get("emp-1");                    // by primary key
-store.getBy("passport", "P123");       // by named key — non-unique, returns a list
-await store.forEachParallel(3, async (entry) => export(entry.record));
-
-const sub = client.subscribe("hr-view", "hr.employees", ReaderStart.now(),
-  (records) => store.putAll(records));                                    // keep it warm
-await sub.close();
+await store.put("emp-1", payload, { passport: "P123", department: "eng" });
+const row = await store.get("emp-1");              // StoreRow | null + freshness
+const rows = await store.getBy("passport", "P123"); // named key — non-unique, a list
+for await (const r of store.iterate()) export(r);
 ```
 
-`client.feeds.load(feed, start, sink)` remains the lighter one-shot
-read when you don't need named-key projections. See
+The store lives on the Nodes — the SDK holds no local copy. See
 [docs/stores.md](docs/stores.md) for the full store guide.
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`

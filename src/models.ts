@@ -156,7 +156,35 @@ export interface NamedKey {
    * group/list lookup); `unique` enforces one row per value, arbitrated
    * first-committed-wins by the store's journal order. */
   unique: boolean;
+  /** Feed-sourced stores only: the projection replay applies to each
+   * committed source record. Build with `Extractor.*`; manual stores
+   * take values on each `put` instead. */
+  extractor?: StoreExtractor;
 }
+
+/** The wire `IndexFieldSpec` an extractor serializes to. */
+export interface StoreExtractor {
+  kind: "key" | "metadata" | "projection";
+  name?: string;
+  extractor?: string;
+  version?: number;
+  field?: string;
+}
+
+/** Factories for feed-sourced named-key projections. */
+export const Extractor = {
+  /** The source record's application Key. */
+  recordKey: (): StoreExtractor => ({ kind: "key" }),
+  /** A named record Metadata entry. */
+  metadata: (name: string): StoreExtractor => ({ kind: "metadata", name }),
+  /** A dotted JSON-path projection over the record payload. */
+  json: (field: string): StoreExtractor => ({
+    kind: "projection",
+    extractor: "json",
+    version: 1,
+    field,
+  }),
+} as const;
 
 /** Freshness evidence every StateStore read reports. */
 export interface StoreFreshness {

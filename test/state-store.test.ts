@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import * as http from "node:http";
 import { AddressInfo } from "node:net";
-import { StateStore, WhitewaterClient } from "../src/index.js";
+import { Extractor, StateStore, WhitewaterClient } from "../src/index.js";
 
 /** Scripted stub covering the StateStore facade endpoints. */
 describe("state store facade", () => {
@@ -111,11 +111,37 @@ describe("state store facade", () => {
     expect(() => StateStore.named("accounts.d").addKey("a").addKey("a")).toThrow("duplicate");
   });
 
-  it("define refuses named keys on a feed-sourced store", async () => {
-    const spec = StateStore.named("accounts.src").addKey("k");
-    await expect(client.stateStores.define(spec, "accounts.events")).rejects.toThrow(
-      "named keys require a manual StateStore",
+  it("define feed-sourced named keys need extractors", async () => {
+    // A feed-sourced named key without a projection is a declaration bug.
+    const bare = StateStore.named("accounts.src").addKey("k");
+    await expect(client.stateStores.define(bare, "accounts.events")).rejects.toThrow(
+      "require an extractor",
     );
+    // An extractor on a manual store is refused — puts carry the values.
+    const manual = StateStore.named("accounts.m").addKey("k", false, Extractor.metadata("pp"));
+    await expect(client.stateStores.define(manual)).rejects.toThrow("manual stores");
+  });
+
+  it("define feed-sourced emits extractors in the typed command", async () => {
+    const spec = StateStore.named("accounts.tagged")
+      .addKey("passport", true, Extractor.metadata("pp"))
+      .addKey("department", false, Extractor.json("dept"));
+    await client.stateStores.define(spec, "accounts.events");
+
+    const sent = bodies("/v1/admin/commands")[0].commands[0];
+    expect(sent.source).toEqual({ kind: "feed", feed: "accounts.events" });
+    expect(sent.named_keys).toEqual([
+      {
+        name: "passport",
+        unique: true,
+        extractor: { kind: "metadata", name: "pp" },
+      },
+      {
+        name: "department",
+        unique: false,
+        extractor: { kind: "projection", extractor: "json", version: 1, field: "dept" },
+      },
+    ]);
   });
 
   it("unbound spec refuses row operations", async () => {

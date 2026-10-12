@@ -18,7 +18,7 @@ export {
   Unavailable,
   WhitewaterError,
 } from "./errors.js";
-export { Cursor, MAX_NAMED_KEYS, ReaderStart } from "./models.js";
+export { Cursor, Extractor, MAX_NAMED_KEYS, ReaderStart } from "./models.js";
 export type {
   AppendBatchResult,
   AppendResult,
@@ -33,6 +33,7 @@ export type {
   ReaderSession,
   ServerFeedback,
   StatementResult,
+  StoreExtractor,
   StoreFreshness,
   StorePage,
   StoreRow,

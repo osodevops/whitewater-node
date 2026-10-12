@@ -92,18 +92,39 @@ await store.drop();                      // or client.stateStores.drop(name)
   every data path refuses. Rows already applied on replicas remain
   until a bounded reclaim pass.
 - Feed-sourced stores: `client.stateStores.define(spec, "accounts.events")`
-  materializes committed Feed history; named keys require a manual
-  store until declared projections exist.
+  materializes committed Feed history.
+
+### Feed-sourced named keys
+
+Named keys on a feed-sourced store declare a projection — how each
+committed source record maps to typed lookup values. Every key carries
+an `Extractor`:
+
+```ts
+const spec = StateStore.named("accounts.tagged")
+  .addKey("passport", true, Extractor.metadata("pp"))
+  .addKey("department", false, Extractor.json("dept"));
+const store = await client.stateStores.define(spec, "accounts.events");
+```
+
+`Extractor.recordKey()` reads the record's key,
+`Extractor.metadata("pp")` a Metadata entry, `Extractor.json("dept")` a
+dotted JSON-path over the payload. Missing fields and unparseable
+payloads project a `Null` posting rather than stalling replay. Manual
+stores omit the extractor — `put` carries the values per row.
 
 ### WCL and typed commands
 
 Everything above is a convenience over the Control Plane's two doors.
-WCL spells `DROP` for stores (there is no `DEFINE`/`MUTATE` spelling —
-declaration and data ops stay typed):
+WCL spells `DEFINE`, `DROP`, `DESCRIBE`, and `SHOW` for stores (data ops
+stay typed):
 
 ```ts
-await client.wcl("DROP STATESTORE accounts.employees");
+await client.wcl("DEFINE STATESTORE accounts.employees KEYS passport UNIQUE, department");
+await client.wcl("DEFINE STATESTORE accounts.tagged FROM FEED accounts.events KEYS passport = METADATA 'pp' UNIQUE, department = JSON 'dept'");
+await client.wcl("SHOW STATESTORES");
 await client.wcl("DESCRIBE STATESTORE accounts.employees"); // stage incl. "dropped"
+await client.wcl("DROP STATESTORE accounts.employees");
 ```
 
 `commands` posts the typed command the facade builds for you:
@@ -128,7 +149,8 @@ await client.commands([
 | Where | Type | Meaning / remedy |
 |---|---|---|
 | `addKey` #11 / duplicate / blank | `Error` | Declaration contract (10-key bound, distinct names). |
-| `define` spec + `source` + named keys | `Error` | Named keys need a manual store — checked before the call. |
+| `define` spec + `source` + bare named keys | `Error` | Feed-sourced keys need an `Extractor` — checked before the call. |
+| `define` manual spec + `Extractor` | `Error` | Extractors apply to feed-sourced stores only. |
 | Data op on unbound spec | `Error` | `StateStore.named` builds a spec; bind via `define` or `client.stateStore(name)`. |
 | Unsafe/non-integer numeric value | `Error` | The wire carries exact i64 — pass a safe integer or bigint within range. |
 | Undeclared named key / missing store | `Refused` 400 | Server-side contract — fix the declaration. |

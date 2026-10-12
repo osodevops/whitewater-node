@@ -22,6 +22,7 @@ import type {
   ReaderPage,
   ReaderSession,
   ReaderStart,
+  StoreExtractor,
   StorePage,
   StoreRow,
   StoreRows,
@@ -742,8 +743,11 @@ export class StateStore {
     return new StateStore(transport, dotted(name));
   }
 
-  /** Declare a named secondary key for `define` (at most MAX_NAMED_KEYS). */
-  addKey(namedKey: string, unique = false): this {
+  /** Declare a named secondary key for `define` (at most MAX_NAMED_KEYS).
+   * `extractor` declares how replay projects each source-Feed record to
+   * this key's values — required on feed-sourced stores, refused on
+   * manual ones. */
+  addKey(namedKey: string, unique = false, extractor?: StoreExtractor): this {
     if (!namedKey || !namedKey.trim()) throw new Error("named key is required");
     if (this.declaredKeys.some((k) => k.name === namedKey)) {
       throw new Error(`duplicate named key: ${namedKey}`);
@@ -751,7 +755,7 @@ export class StateStore {
     if (this.declaredKeys.length >= StateStore.MAX_NAMED_KEYS) {
       throw new Error(`a StateStore declares at most ${StateStore.MAX_NAMED_KEYS} named keys`);
     }
-    this.declaredKeys.push({ name: namedKey, unique });
+    this.declaredKeys.push({ name: namedKey, unique, extractor });
     return this;
   }
 
@@ -911,17 +915,24 @@ export class StateStoresClient {
   /**
    * Declare `spec` on the Control Plane and return it bound to this
    * client. `source` names a same-Domain Feed the store materializes
-   * from; omitted means a manual store (required when the spec declares
-   * named keys).
+   * from; omitted means a manual store. Feed-sourced named keys must
+   * each declare an `extractor` so replay can project typed values;
+   * extractors on a manual store are refused.
    */
   async define(spec: StateStore, source?: string, requestId?: string): Promise<StateStore> {
     if (!(spec instanceof StateStore)) {
       throw new Error("define() takes a StateStore spec — use StateStore.named(name)");
     }
-    if (spec.namedKeys.length > 0 && source) {
+    if (!source && spec.namedKeys.some((k) => k.extractor !== undefined)) {
       throw new Error(
-        "named keys require a manual StateStore until a declared " +
-          "source-Feed projection exists",
+        "named-key extractors apply to feed-sourced StateStores; " +
+          "manual stores take named values on each put",
+      );
+    }
+    if (source && spec.namedKeys.some((k) => k.extractor === undefined)) {
+      throw new Error(
+        "feed-sourced named keys require an extractor " +
+          "(Extractor.recordKey()/metadata()/json())",
       );
     }
     await this.transport.post("/v1/admin/commands", {
@@ -931,7 +942,11 @@ export class StateStoresClient {
           command: "define_state_store",
           name: spec.name,
           source: source ? { kind: "feed", feed: dotted(source) } : { kind: "manual" },
-          named_keys: spec.namedKeys.map((k) => ({ name: k.name, unique: k.unique })),
+          named_keys: spec.namedKeys.map((k) => ({
+            name: k.name,
+            unique: k.unique,
+            ...(k.extractor ? { extractor: k.extractor } : {}),
+          })),
         },
       ],
     });

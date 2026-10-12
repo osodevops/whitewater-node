@@ -95,6 +95,27 @@ await store.drop();                      // or client.stateStores.drop(name)
   materializes committed Feed history; named keys require a manual
   store until declared projections exist.
 
+### WCL and typed commands
+
+Everything above is a convenience over the Control Plane's two doors.
+WCL spells `DROP` for stores (there is no `DEFINE`/`MUTATE` spelling —
+declaration and data ops stay typed):
+
+```ts
+await client.wcl("DROP STATESTORE accounts.employees");
+await client.wcl("DESCRIBE STATESTORE accounts.employees"); // stage incl. "dropped"
+```
+
+`commands` posts the typed command the facade builds for you:
+
+```ts
+await client.commands([
+  { command: "define_state_store", name: "accounts.employees",
+    source: { kind: "manual" },
+    named_keys: [{ name: "passport", unique: true }] },
+]);
+```
+
 ## What a StateStore facade is **not**
 
 - **Not a local store** — there is no in-process copy to drift from

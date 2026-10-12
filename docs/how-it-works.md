@@ -60,6 +60,58 @@ Every management call resolves to `ControlExecution` — `requestId`,
 `revision`, `authority`, `warning`, and one `StatementResult` per WCL
 statement.
 
+### WCL by example
+
+Raw script — several statements commit as one request (pass a shared
+`requestId` to dedupe a retried batch):
+
+```ts
+await client.wcl(`
+  CREATE DOMAIN shop;
+  CREATE FEED shop.orders;
+  CREATE WRITER orders-writer TO shop.orders;
+  OPEN WRITER SESSION orders-writer;
+  CREATE READER audit FROM shop.orders START AT BEGINNING;
+  SHOW FEEDS;
+`);
+```
+
+The same calls through the typed builders — each serializes one WCL
+statement and calls `wcl` internally:
+
+```ts
+await client.createDomain("shop");                  // CREATE DOMAIN shop;
+await client.createFeed("shop.orders");             // CREATE FEED shop.orders;
+await client.createWriter("orders-writer", "shop.orders");
+await client.openWriterSession("orders-writer");    // epoch in .data
+await client.createReader("audit", "shop.orders", ReaderStart.beginning());
+await client.listFeeds();                           // SHOW FEEDS;
+await client.seekReader("audit", ReaderStart.now());// SEEK READER ... TO NOW;
+await client.dropFeed("shop.orders");               // DROP FEED shop.orders;
+```
+
+`client.commands([...])` is the second door — the typed JSON command
+path for what WCL does not spell. Declaring a StateStore with named
+keys is the current example (there is no `DEFINE STATESTORE` WCL
+statement yet):
+
+```ts
+await client.commands([{
+  command: "define_state_store",
+  name: "accounts.employees",
+  source: { kind: "manual" },
+  named_keys: [
+    { name: "passport", unique: true },
+    { name: "department", unique: false },
+  ],
+}]);
+```
+
+(`client.stateStores.define(spec)` posts exactly this body for you.)
+
+`DROP` is spelled in WCL for every resource including stores:
+`await client.wcl("DROP STATESTORE accounts.employees")` ≡ `store.drop()`.
+
 ## Reading
 
 Three shapes, in increasing durability:

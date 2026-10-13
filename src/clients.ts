@@ -48,7 +48,12 @@ export class WriterSessionClient {
     private readonly transport: Transport,
     private readonly writer: string,
     private readonly sessionEpoch: number,
+    private readonly compression = false,
   ) {}
+
+  useCompression(enabled = true): WriterSessionClient {
+    return new WriterSessionClient(this.transport, this.writer, this.sessionEpoch, enabled);
+  }
 
   /** Idempotent single append; same requestId dedups on the server. */
   async append(input: AppendInput): Promise<AppendResult> {
@@ -61,6 +66,7 @@ export class WriterSessionClient {
       input.eventTimeNs ?? null,
       input.metadata ?? {},
     );
+    if (this.compression) body.use_compression = true;
     return wire.appendResult(await this.transport.post("/v1/writers/append", body));
   }
 
@@ -78,6 +84,9 @@ export class WriterSessionClient {
         ),
       ),
     };
+    if (this.compression) {
+      for (const record of body.records) record.use_compression = true;
+    }
     const response = (await this.transport.post("/v1/writers/append-batch", body)) as {
       results?: unknown[];
       feedback?: unknown;
@@ -241,7 +250,11 @@ export class SubscriptionMemberClient {
  * identity — no named session required.
  */
 export class FeedClient {
-  constructor(private readonly transport: Transport) {}
+  constructor(private readonly transport: Transport, private readonly compression = false) {}
+
+  useCompression(enabled = true): FeedClient {
+    return new FeedClient(this.transport, enabled);
+  }
 
   /** Committed record history via GET /v1/feeds/records. */
   async records(feed: string, limit?: number, after?: Cursor | null): Promise<FeedRecord[]> {
@@ -279,9 +292,9 @@ export class FeedClient {
 
   /** Ad-hoc append; identical `requestId` retries dedupe. */
   async append(feed: string, record: FeedAppend): Promise<AppendResult> {
-    return wire.appendResult(
-      await this.transport.post("/v1/feeds/append", wire.feedAppendRequest(feed, record)),
-    );
+    const body = wire.feedAppendRequest(feed, record);
+    if (this.compression) body.use_compression = true;
+    return wire.appendResult(await this.transport.post("/v1/feeds/append", body));
   }
 
   /**

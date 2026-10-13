@@ -185,6 +185,7 @@ class Runner {
       case "writer.append": {
         const r = await client
           .writer(String(args.writer), Number(args.session_epoch))
+          .useCompression(Boolean(args.use_compression))
           .append({
             requestId: String(args.request_id),
             key: Runner.bytes(args.key),
@@ -207,6 +208,7 @@ class Runner {
         const records = args.records as Json[];
         const batch = await client
           .writer(String(records[0].writer), Number(records[0].session_epoch))
+          .useCompression(Boolean(args.use_compression))
           .appendBatch(
             records.map((r) => ({
               requestId: String(r.request_id),
@@ -336,7 +338,7 @@ class Runner {
         };
       }
       case "feed.append": {
-        const r = await client.feeds.append(String(args.feed), {
+        const r = await client.feeds.useCompression(Boolean(args.use_compression)).append(String(args.feed), {
           requestId: String(args.request_id),
           writerSessionId: String(args.writer_session_id),
           writerEpoch: Number(args.writer_epoch),

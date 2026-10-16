@@ -9,6 +9,17 @@ export {
   WriterSessionClient,
 } from "./clients.js";
 export type { AppendInput, WhitewaterClientOptions } from "./clients.js";
+export { codecs, textMetadata } from "./codecs.js";
+export type { Codec } from "./codecs.js";
+export { Feed, FeedReader, FeedWriter } from "./feed.js";
+export type {
+  FeedEvent,
+  FeedMessage,
+  FeedPage,
+  FeedReaderPage,
+} from "./feed.js";
+export { Store } from "./store-view.js";
+export type { Row, RowPage, RowsResult } from "./store-view.js";
 export {
   AmbiguousResult,
   Conflict,

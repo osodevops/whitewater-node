@@ -6,7 +6,10 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { codecs, type Codec } from "./codecs.js";
 import { AmbiguousResult, Conflict, Unavailable, WhitewaterError } from "./errors.js";
+import { Feed } from "./feed.js";
+import { Store } from "./store-view.js";
 import { MAX_NAMED_KEYS } from "./models.js";
 import type {
   AppendBatchResult,
@@ -47,9 +50,14 @@ export class WriterSessionClient {
   constructor(
     private readonly transport: Transport,
     private readonly writer: string,
-    private readonly sessionEpoch: number,
+    private readonly _sessionEpoch: number,
     private readonly compression = false,
   ) {}
+
+  /** The session's fencing epoch. */
+  get sessionEpoch(): number {
+    return this._sessionEpoch;
+  }
 
   useCompression(enabled = true): WriterSessionClient {
     return new WriterSessionClient(this.transport, this.writer, this.sessionEpoch, enabled);
@@ -660,6 +668,50 @@ export class WhitewaterClient {
 
   writer(name: string, sessionEpoch: number): WriterSessionClient {
     return new WriterSessionClient(this.transport, name, sessionEpoch);
+  }
+
+  /**
+   * A codec-bound Feed facade — serialization is bound once so every
+   * write encodes and every read decodes automatically:
+   *
+   * ```ts
+   * const orders = client.feed("orders.events", codecs.json<Order>());
+   * const writer = await orders.writer("ingest");
+   * await writer.append("order-1", order);        // JSON-encoded
+   * const reader = await orders.reader("audit", 64);
+   * const page = await reader.fetch();            // FeedMessage<string, Order>[]
+   * ```
+   *
+   * `client.feed(name)` binds the default `Feed<string, Buffer>` —
+   * UTF-8 keys and untouched payload bytes, the escape hatch to the
+   * wire. `client.feed(name, valueCodec)` keeps UTF-8 keys (the common
+   * case); the three-argument form binds both codecs explicitly —
+   * protobuf/msgpack/custom via {@link codecs.custom}.
+   */
+  feed(name: string): Feed<string, Buffer>;
+  feed<V>(name: string, valueCodec: Codec<V>): Feed<string, V>;
+  feed<K, V>(name: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Feed<K, V>;
+  feed<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Feed<K, V> | Feed<string, V> | Feed<string, Buffer> {
+    const keyCodec = b !== undefined ? (a as Codec<K>) : (codecs.utf8() as unknown as Codec<K>);
+    const valueCodec = (b ?? a ?? codecs.bytes()) as Codec<V>;
+    return new Feed<K, V>(this, dotted(name), keyCodec, valueCodec);
+  }
+
+  /**
+   * A codec-bound StateStore facade — every `get`/`put`/`iterate`
+   * serializes through the bound codecs. `client.store(name)` binds
+   * `Store<string, Buffer>`; a second argument types the payload
+   * (UTF-8 keys); three arguments bind both codecs. The byte-level
+   * {@link stateStore} facade remains for raw access and declaration.
+   */
+  store(name: string): Store<string, Buffer>;
+  store<V>(name: string, valueCodec: Codec<V>): Store<string, V>;
+  store<K, V>(name: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Store<K, V>;
+  store<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Store<K, V> | Store<string, V> | Store<string, Buffer> {
+    const bound = StateStore.bound(this.transport, name);
+    const keyCodec = b !== undefined ? (a as Codec<K>) : (codecs.utf8() as unknown as Codec<K>);
+    const valueCodec = (b ?? a ?? codecs.bytes()) as Codec<V>;
+    return Store.bind(bound, keyCodec, valueCodec);
   }
 
   reader(name: string): ReaderSessionClient {

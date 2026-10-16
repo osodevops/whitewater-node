@@ -9,6 +9,18 @@ import { randomUUID } from "node:crypto";
 import { codecs, type Codec } from "./codecs.js";
 import { AmbiguousResult, Conflict, Unavailable, WhitewaterError } from "./errors.js";
 import { Feed } from "./feed.js";
+import {
+  decodeDemandReport,
+  decodeHotKeys,
+  decodeIndexPage,
+  decodePipes,
+  predicateFields,
+  Pipe,
+  type HotKey,
+  type IndexPage,
+  type IndexPredicate,
+  type PipeInfo,
+} from "./operations.js";
 import { Store } from "./store-view.js";
 import { MAX_NAMED_KEYS } from "./models.js";
 import type {
@@ -506,6 +518,82 @@ export class WhitewaterClient {
   async healthy(): Promise<boolean> {
     const health = (await this.transport.get("/health")) as { status?: string };
     return health?.status === "ok";
+  }
+
+  // ---- Pipe lifecycle ---------------------------------------------------------
+
+  /** Bind a declared Pipe for lifecycle operations:
+   * describe/pause/resume/drop. */
+  pipe(name: string): Pipe {
+    return new Pipe(this, name);
+  }
+
+  /** `SHOW PIPES`: the catalog of declared Pipes. */
+  async pipes(): Promise<PipeInfo[]> {
+    const execution = await this.commands([{ command: "show", kind: "pipes" }]);
+    return decodePipes(execution.results[0]?.data ?? []);
+  }
+
+  // ---- Index queries ------------------------------------------------------------
+
+  /** Query a replicated Index by predicate — exact, prefix, or range
+   * over typed values. `strict` waits for the committed target rather
+   * than answering stale. */
+  async queryIndex(
+    index: string,
+    predicate: IndexPredicate,
+    options: { limit?: number; strict?: boolean; waitMs?: number } = {},
+  ): Promise<IndexPage> {
+    const body: Record<string, unknown> = {
+      index: dotted(index),
+      ...predicateFields(predicate),
+      strict: options.strict ?? false,
+    };
+    if (options.limit !== undefined) body.limit = options.limit;
+    if (options.waitMs !== undefined) body.wait_ms = options.waitMs;
+    return decodeIndexPage(await this.transport.post("/v1/indexes/query", body));
+  }
+
+  // ---- Demand observability -------------------------------------------------------
+
+  private async demand(surface: string, resourceKey: string, nameField: string) {
+    return decodeDemandReport(
+      await this.transport.get(`/v1/admin/demand/${surface}`),
+      resourceKey,
+      nameField,
+    );
+  }
+
+  /** `GET /v1/admin/demand/feeds` — per-Feed append/read attribution. */
+  demandFeeds() {
+    return this.demand("feeds", "feeds", "feed");
+  }
+
+  /** `GET /v1/admin/demand/readers` — per-Reader request/fetch/ack counters. */
+  demandReaders() {
+    return this.demand("readers", "readers", "reader");
+  }
+
+  /** `GET /v1/admin/demand/subscriptions` — per-Subscription counters. */
+  demandSubscriptions() {
+    return this.demand("subscriptions", "subscriptions", "subscription");
+  }
+
+  /** `GET /v1/admin/demand/indexes` — per-Index query counters. */
+  demandIndexes() {
+    return this.demand("indexes", "indexes", "index");
+  }
+
+  /** `GET /v1/admin/demand/pipes` — per-Pipe drive/apply/failure counters. */
+  demandPipes() {
+    return this.demand("pipes", "pipes", "pipe");
+  }
+
+  /** `GET /v1/admin/demand/hot-keys` — dominant-Key evidence across
+   * Feeds. A strictly ordered hot Key is never parallelized: the
+   * honest signal is to spread or shed load for the Key. */
+  async hotKeys(): Promise<HotKey[]> {
+    return decodeHotKeys(await this.transport.get("/v1/admin/demand/hot-keys"));
   }
 
   // ---- Resource management ---------------------------------------------------

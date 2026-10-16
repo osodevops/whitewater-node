@@ -21,6 +21,23 @@ export type {
 export { Store } from "./store-view.js";
 export type { Row, RowPage, RowsResult } from "./store-view.js";
 export {
+  decodePipes,
+  demandCounter,
+  indexBound,
+  indexPredicate,
+  Pipe,
+} from "./operations.js";
+export type {
+  DemandReport,
+  DemandRow,
+  HotKey,
+  IndexBound,
+  IndexPage,
+  IndexPredicate,
+  IndexRow,
+  PipeInfo,
+} from "./operations.js";
+export {
   AmbiguousResult,
   Conflict,
   LeaseConflict,

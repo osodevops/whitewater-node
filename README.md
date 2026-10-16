@@ -105,6 +105,40 @@ Cursors are branded opaque strings: never parsed, ordered, or
 fabricated. `eventTimeNs`/`ingestTimeNs` are `bigint` — the full signed
 64-bit nanosecond range round-trips exactly.
 
+## Pipes, indexes, and operations
+
+Managed Pipes and replicated Indexes share the same topology-free model
+— names, never partitions or Nodes:
+
+```ts
+// Pipe lifecycle: describe, pause, resume, drop.
+const pipe = client.pipe("orders.relay");
+const info = await pipe.describe();    // stage, operation, outputs, status
+await pipe.pause(); await pipe.resume(); await pipe.drop();
+const pipes = await client.pipes();    // the declared catalog
+
+// Index queries: exact, prefix, or range predicates over typed values.
+const page = await client.queryIndex(
+  "crm.byregion",
+  indexPredicate.range(
+    ["emea"], indexBound.inclusive(0), indexBound.exclusive(99)),
+  { limit: 50, strict: true });
+for (const row of page.rows) { /* row.key / row.payload Buffers */ }
+
+// Demand observability: typed rows + per-domain rollups.
+const report = await client.demandFeeds();
+const appended = demandCounter(report.rows[0], "appended_records");
+await client.demandReaders(); await client.demandSubscriptions();
+await client.demandIndexes(); await client.demandPipes();
+const hot = await client.hotKeys();    // dominant-key evidence per feed
+```
+
+Pipe operation payloads (`PipeInfo.operation`) and demand fields
+(`DemandRow.fields`, `HotKey.evidence`) stay opaque objects so
+server-side variants evolve without an SDK bump. `queryIndex` values
+take `StoreValue` scalars — `bigint` narrows to i64, `number` must be a
+safe integer.
+
 ## Build & test
 
 ```bash

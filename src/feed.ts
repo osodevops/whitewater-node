@@ -10,7 +10,8 @@ import type {
   ReaderSession,
   TemporaryFetchOptions,
 } from "./models.js";
-import type { ReaderStart } from "./models.js";
+import { ReaderStart } from "./models.js";
+import { FeedConsumer } from "./consumer.js";
 import type {
   ReaderSessionClient,
   Subscription,
@@ -365,9 +366,43 @@ export class Feed<K, V> {
     onRecords: (messages: FeedMessage<K, V>[]) => void | Promise<void>,
     onError?: (error: WhitewaterError) => void,
   ): Subscription {
-    return this.client.subscribe(reader, this.name, start, async (records) => {
-      await onRecords(decodeMessages(records, this.keyCodec, this.valueCodec));
-    }, onError);
+    return this.subscribeDecoded(reader, start, undefined, onRecords, onError);
+  }
+
+  /** Decoded subscribe with capacity override — the FeedConsumer seam.
+   * @internal */
+  subscribeDecoded(
+    reader: string,
+    start: ReaderStart | undefined,
+    capacity: number | undefined,
+    onRecords: (messages: FeedMessage<K, V>[]) => void | Promise<void>,
+    onError?: (error: WhitewaterError) => void,
+  ): Subscription {
+    return this.client.subscribe(
+      reader,
+      this.name,
+      start ?? ReaderStart.beginning(),
+      async (records) => {
+        await onRecords(decodeMessages(records, this.keyCodec, this.valueCodec));
+      },
+      onError,
+      capacity,
+    );
+  }
+
+  /** A permanent, supervised consumer bound to this Feed's named
+   * Reader — iterate decoded records or `run` a per-record handler;
+   * open/fetch/ack/reopen/backoff stay internal:
+   *
+   * ```ts
+   * for await (const msg of feed.consumer("enricher")) {
+   *   await process(msg);
+   * }
+   * ```
+   *
+   * See {@link FeedConsumer} for the full contract. */
+  consumer(reader: string): FeedConsumer<K, V> {
+    return new FeedConsumer(this, reader);
   }
 
   private feedClient() {

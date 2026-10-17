@@ -397,6 +397,11 @@ export class Subscription {
     return this._failure;
   }
 
+  /** Resolves when the loop exits — the supervised-consumer seam. */
+  get settled(): Promise<void> {
+    return this.done;
+  }
+
   /** Signal stop, release the Reader session, and await the loop. */
   async close(): Promise<void> {
     this.stopped = true;
@@ -830,13 +835,14 @@ export class WhitewaterClient {
     start: ReaderStart,
     onRecords: (records: FeedRecord[]) => void | Promise<void>,
     onError?: (error: WhitewaterError) => void,
+    capacity = SUBSCRIBE_CAPACITY,
   ): Subscription {
     return new Subscription(
       this,
       reader,
       feed,
       start,
-      SUBSCRIBE_CAPACITY,
+      capacity,
       onRecords,
       onError,
     );

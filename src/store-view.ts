@@ -135,6 +135,36 @@ export class Store<K, V> {
     };
   }
 
+  /** Value-only primary lookup: the decoded value or null when the key
+   * is absent. `get` remains for the row's freshness/applied-cursor
+   * evidence. */
+  async find(
+    key: K,
+    options: { strict?: boolean; waitMs?: number } = {},
+  ): Promise<V | null> {
+    const row = await this.get(key, options);
+    return row === null ? null : row.value;
+  }
+
+  /** Value-only named-key lookup: the first matching row's decoded
+   * value or null on no match. `getBy` remains for every match plus
+   * freshness evidence. */
+  async findBy(
+    namedKey: string,
+    value: StoreValue,
+    options: { strict?: boolean; waitMs?: number } = {},
+  ): Promise<V | null> {
+    const rows = await this.getBy(namedKey, value, { ...options, limit: 1 });
+    return rows.rows.length === 0 ? null : rows.rows[0].value;
+  }
+
+  /** Primary lookup returning `fallback` when the key is absent —
+   * counters and flags become one line. */
+  async getOrDefault(key: K, fallback: V): Promise<V> {
+    const value = await this.find(key);
+    return value === null ? fallback : value;
+  }
+
   /** Remove the row and its named postings. */
   delete(key: K, mutationId = randomUUID()): Promise<MutationResult> {
     return this.store.delete(this.keyCodec.encode(key), mutationId);

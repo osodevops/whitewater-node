@@ -79,6 +79,48 @@ textMetadata({k:"v"})  // text Metadata map -> wire Buffers
 without a wire call. The byte-level `client.feeds`, `client.writer`,
 `client.reader`, and `client.stateStore` facades remain for raw access.
 
+### Permanent consumers — the Kafka loop without the plumbing
+
+`feed.consumer(name)` binds the durable named Reader (the
+consumer-group equivalent) and owns the fetch → deliver → ack cycle:
+transient failures retry with backoff, a fenced session re-opens,
+progress resumes from the server-side cursor. Your code is a for-await
+loop over decoded records:
+
+```ts
+for await (const msg of inFeed.consumer("enricher")) {
+  await process(msg);              // msg.value is your type
+}
+
+// or a handler, resolving only on close():
+await inFeed.consumer("enricher").onRecord(process).run();
+```
+
+- The page acks after every record's handler/yield completes — a
+  thrown handler (or abandoned iteration) leaves it unacked, so it
+  redelivers (at-least-once: dedupe effects via `requestId`, route
+  poison pills to a DLQ yourself).
+- `run()`/the iterator throw only for startup refusals (bad names,
+  denied auth) — everything after the first open is supervised forever
+  until `consumer.close()` (safe from signal handlers and from inside
+  a handler; the in-flight page finishes and acks first).
+- `.startAt(...)`, `.capacity(n)`, `.backoff(ms, ms)`, `.onError(fn)`,
+  `.lastError`, `.isRunning`, `runAsync(handler)` tune and observe it;
+  `feed.subscribe` remains for page-oriented control.
+
+Value-only store lookups skip the row wrapper when freshness evidence
+isn't needed — `null` on miss:
+
+```ts
+const user = await users.find(email);
+const user2 = await users.findBy("user_id", userId);   // first match
+const count = await counters.getOrDefault(bucket, 0);
+```
+
+A complete enrichment service — durable consumer, named-key fallback,
+DLQ, idempotent outputs, counters — is
+[examples/enrich-users.mjs](examples/enrich-users.mjs).
+
 ## Wire-level API
 
 ```ts

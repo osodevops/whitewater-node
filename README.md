@@ -208,6 +208,23 @@ npm run build       # tsc -> dist/ (JS + .d.ts)
 npm test            # vitest: unit (+ conformance when env is set)
 ```
 
+## Unit-test doubles
+
+`createFakeRiverbed()` serves the wire contract over loopback `node:http`
+— request-id dedupe, ack-gated redelivery, epoch fencing, modeled
+StateStores — so application tests run the real client with no Riverbed.
+
+```ts
+import { createFakeRiverbed } from "whitewater-client";
+const riverbed = await createFakeRiverbed();
+const client = new WhitewaterClient({ endpoints: riverbed.endpoints, apiKey: "test" });
+// ...
+await riverbed.close();
+```
+
+See `test/testing-double.test.ts` and the
+[testing guide](../whitewater/docs/guides/testing-your-app.md).
+
 ## Conformance
 
 `test/conformance.test.ts` executes the shared fixture corpus against a

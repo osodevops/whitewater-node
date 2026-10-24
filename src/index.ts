@@ -54,6 +54,8 @@ export {
   Unavailable,
   WhitewaterError,
 } from "./errors.js";
+export { createFakeRiverbed, FakeRiverbed } from "./testing.js";
+export type { FakeRiverbedOptions } from "./testing.js";
 export { Cursor, Extractor, MAX_NAMED_KEYS, ReaderStart } from "./models.js";
 export type {
   AppendBatchResult,

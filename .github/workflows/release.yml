@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Inject tag version into package.json
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack tarball into staging dir
+        run: |
+          npm pack
+          mkdir -p artifacts
+          mv *.tgz artifacts/
+
+      - name: Generate checksums
+        run: cd artifacts && sha256sum * > checksums.txt && cd -
+
+      - name: Create GitHub release
+        run: gh release create "${{ github.ref_name }}" artifacts/* --generate-notes --title "whitewater-client ${{ env.VERSION }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

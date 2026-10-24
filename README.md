@@ -153,6 +153,25 @@ Managed Pipes and replicated Indexes share the same topology-free model
 — names, never partitions or Nodes:
 
 ```ts
+// Pipe declaration: the client names the business key, source and
+// outputs — the server owns panes, leases and the effect journal.
+await client.defineForwardPipe("orders.relay", "orders-sub",
+  "orders.relayed");
+await client.defineEnrichPipe("orders.enrich", "orders-sub",
+  "orders.enriched", "crm.customers",
+  PipeOperation.enrich(Extractor.recordKey(),
+    { freshness: "latest", onMiss: "quarantine" }),
+  "orders.enrich-dlq");
+await client.defineWindowPipe("orders.hourly", "orders-sub",
+  "stats.orders-hourly",
+  PipeOperation.window(3_600_000_000_000,  // window_ns: 1h
+    Extractor.recordKey(), WindowAggregation.count(),
+    { time: "event",
+      watermarkNs: 300_000_000_000,  // 5m horizon
+      graceNs: 30_000_000_000,       // 30s late revisions
+      expireNs: 7_200_000_000_000 }),
+  "orders.hourly-emitted");
+
 // Pipe lifecycle: describe, pause, resume, drop.
 const pipe = client.pipe("orders.relay");
 const info = await pipe.describe();    // stage, operation, outputs, status

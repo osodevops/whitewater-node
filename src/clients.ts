@@ -16,6 +16,7 @@ import {
   decodePipes,
   predicateFields,
   Pipe,
+  PipeOperation,
   type HotKey,
   type IndexPage,
   type IndexPredicate,
@@ -537,6 +538,89 @@ export class WhitewaterClient {
   async pipes(): Promise<PipeInfo[]> {
     const execution = await this.commands([{ command: "show", kind: "pipes" }]);
     return decodePipes(execution.results[0]?.data ?? []);
+  }
+
+  // ---- Pipe declaration --------------------------------------------------------
+
+  /**
+   * `DEFINE PIPE <name> FROM SUBSCRIPTION <subscription> TO FEED <feed>` —
+   * the copy Pipe. `name`, `subscription`, and `outputFeed` are
+   * same-Domain dotted names.
+   */
+  defineForwardPipe(
+    name: string,
+    subscription: string,
+    outputFeed: string,
+  ): Promise<ControlExecution> {
+    return this.commands([
+      {
+        command: "define_pipe",
+        name: dotted(name),
+        subscription: dotted(subscription),
+        output_feed: dotted(outputFeed),
+        operation: PipeOperation.forward().toWire(),
+      },
+    ]);
+  }
+
+  /**
+   * `DEFINE PIPE ... ENRICH STATESTORE <store>` — point-lookup
+   * enrichment. `operation` must be {@link PipeOperation.enrich};
+   * `quarantineFeed` resolves the miss-quarantine target when the
+   * operation's miss disposition is `"quarantine"`.
+   */
+  defineEnrichPipe(
+    name: string,
+    subscription: string,
+    outputFeed: string,
+    store: string,
+    operation: PipeOperation,
+    quarantineFeed?: string,
+  ): Promise<ControlExecution> {
+    if (operation?.operation !== "enrich") {
+      throw new Error("enrich pipes take PipeOperation.enrich(...)");
+    }
+    const command: Record<string, unknown> = {
+      command: "define_pipe",
+      name: dotted(name),
+      subscription: dotted(subscription),
+      output_feed: dotted(outputFeed),
+      output_store: dotted(store),
+      operation: operation.toWire(),
+    };
+    if (quarantineFeed !== undefined) {
+      command.quarantine_feed = dotted(quarantineFeed);
+    }
+    return this.commands([command]);
+  }
+
+  /**
+   * `DEFINE PIPE ... TO STATESTORE <store>` — rolling-window
+   * aggregation. `operation` must be {@link PipeOperation.window};
+   * `emitFeed` optionally publishes closed panes and requires the
+   * operation declare a lateness bound (`maxLateNs` or `watermarkNs`).
+   */
+  defineWindowPipe(
+    name: string,
+    subscription: string,
+    outputStore: string,
+    operation: PipeOperation,
+    emitFeed?: string,
+  ): Promise<ControlExecution> {
+    if (operation?.operation !== "window") {
+      throw new Error("window pipes take PipeOperation.window(...)");
+    }
+    const command: Record<string, unknown> = {
+      command: "define_pipe",
+      name: dotted(name),
+      subscription: dotted(subscription),
+      output_store: dotted(outputStore),
+      operation: operation.toWire(),
+    };
+    if (emitFeed !== undefined) {
+      command.emit_feed = dotted(emitFeed);
+    }
+    return this.commands([command]);
   }
 
   // ---- Index queries ------------------------------------------------------------

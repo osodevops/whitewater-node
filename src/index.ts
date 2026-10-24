@@ -27,16 +27,23 @@ export {
   indexBound,
   indexPredicate,
   Pipe,
+  PipeOperation,
+  WindowAggregation,
 } from "./operations.js";
 export type {
   DemandReport,
   DemandRow,
+  EnrichFreshness,
+  EnrichMiss,
+  EnrichPipeOptions,
   HotKey,
   IndexBound,
   IndexPage,
   IndexPredicate,
   IndexRow,
   PipeInfo,
+  WindowPipeOptions,
+  WindowTime,
 } from "./operations.js";
 export {
   AmbiguousResult,

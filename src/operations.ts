@@ -3,7 +3,7 @@
  * never partitions or Nodes). */
 
 import { Buffer } from "node:buffer";
-import type { StoreValue } from "./models.js";
+import type { StoreExtractor, StoreValue } from "./models.js";
 import * as wire from "./wire.js";
 
 // ---------------------------------------------------------------------------
@@ -117,6 +117,283 @@ export class Pipe {
   private async lifecycle(command: string): Promise<void> {
     await this.client.commands([{ command, name: this.name }]);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pipe operations (define_pipe)
+// ---------------------------------------------------------------------------
+
+/** Which record clock a `window` Pipe buckets into panes — both are
+ * signed 64-bit Unix epoch nanoseconds on the record itself. `"event"`
+ * (the default) tracks the application-stamped occurrence clock;
+ * `"ingest"` tracks the durable-arrival clock. */
+export type WindowTime = "event" | "ingest";
+
+/** How fresh an `enrich` Pipe lookup row must be before it is journaled.
+ * `"latest"` (the default) serves the replica's applied state — the
+ * resolution is journaled either way, never re-read on replay.
+ * `"strict"` requires applied to cover committed at read entry; a
+ * lagging replica yields a retryable drive failure, never a stale row. */
+export type EnrichFreshness = "latest" | "strict";
+
+/** What an `enrich` Pipe lookup miss does to the output record.
+ * `"forward"` (the default) emits with `enrich.matched = false`;
+ * `"drop"` consumes without emitting — an acknowledged, replay-safe
+ * decision; `"quarantine"` routes the miss to the Pipe's declared
+ * quarantine Feed. */
+export type EnrichMiss = "forward" | "drop" | "quarantine";
+
+/** What a `window` Pipe adds to each pane's accumulator — the wire
+ * `WindowAggregation` object verbatim: `{"aggregation":"count"}`,
+ * `{"aggregation":"sum","value":<IndexFieldSpec>}`, or
+ * `{"aggregation":"average","value":<IndexFieldSpec>}`. Build with the
+ * {@link WindowAggregation} factories. */
+export type WindowAggregation =
+  | { aggregation: "count" }
+  | { aggregation: "sum"; value: StoreExtractor }
+  | { aggregation: "average"; value: StoreExtractor };
+
+/** Factories for `window` Pipe aggregations. */
+export const WindowAggregation = {
+  /** Count records per (group Key, pane). */
+  count: (): WindowAggregation => ({ aggregation: "count" }),
+  /** Sum one extracted integer value per pane. */
+  sum: (value: StoreExtractor): WindowAggregation => {
+    indexFieldSpecWire(value, "sum value");
+    return { aggregation: "sum", value };
+  },
+  /** Track count and integer sum per pane; readers divide. */
+  average: (value: StoreExtractor): WindowAggregation => {
+    indexFieldSpecWire(value, "average value");
+    return { aggregation: "average", value };
+  },
+} as const;
+
+/** Options for {@link PipeOperation.enrich}. */
+export interface EnrichPipeOptions {
+  /** Lookup freshness; default `"latest"`. */
+  freshness?: EnrichFreshness;
+  /** Resolve through a declared named secondary key instead of the
+   * store's primary key — the store must declare the named key. */
+  named?: string;
+  /** Miss disposition; default `"forward"`. `"quarantine"` requires the
+   * Pipe declaration to name a `quarantineFeed`. */
+  onMiss?: EnrichMiss;
+}
+
+/** Options for {@link PipeOperation.window}. Every `*Ns` bound is a u64
+ * duration in nanoseconds and travels as a strict JSON number — never a
+ * decimal string — so values must fit the safe-integer range. */
+export interface WindowPipeOptions {
+  /** Which record clock assigns panes; default `"event"`. */
+  time?: WindowTime;
+  /** Lateness bound: a record arriving more than this far behind its own
+   * `event_time_ns` quarantines into a countable `late` row. Event clock
+   * only; mutually exclusive with `watermarkNs`. */
+  maxLateNs?: number | bigint;
+  /** Event-time watermark: the driver closes a pane once the durable
+   * horizon `max(event_time) - watermarkNs` passes its end. Event clock
+   * only; mutually exclusive with `maxLateNs`. */
+  watermarkNs?: number | bigint;
+  /** Revision bound, requires `watermarkNs`: an event landing on an
+   * already-emitted pane within the grace bound revises and re-emits it;
+   * past the bound it counts into the `late` row. */
+  graceNs?: number | bigint;
+  /** Pane-row retention bound: a pane row deletes once
+   * `pane_end + expireNs` is behind the close clock. Must exceed the
+   * declared lateness/revision bound so a pane provably closes first. */
+  expireNs?: number | bigint;
+  /** Bound on distinct active group Keys held in pane/sentinel state
+   * (the server accepts at most 512); unset leaves growth unbounded. */
+  keyLimit?: number | bigint;
+  /** Bound on accounted pane-state bytes (the server accepts at most
+   * 256 KiB); unset leaves byte growth unbounded. */
+  byteLimit?: number | bigint;
+}
+
+/**
+ * The processing step a Pipe applies to each delivered input record.
+ * Build with {@link PipeOperation.forward}, {@link PipeOperation.enrich},
+ * or {@link PipeOperation.window}; the wire form is internally tagged on
+ * `operation` and embedded under `operation` in `define_pipe`.
+ */
+export class PipeOperation {
+  private constructor(
+    /** The operation tag — also the wire discriminant. */
+    readonly operation: "forward" | "enrich" | "window",
+    private readonly wireForm: Record<string, unknown>,
+  ) {}
+
+  /** Copy each delivered record to the output Feed unchanged. */
+  static forward(): PipeOperation {
+    return new PipeOperation("forward", { operation: "forward" });
+  }
+
+  /**
+   * Point-lookup enrichment against the Pipe's `output_store`: resolve
+   * one row by the projected `key` and copy its payload into output
+   * Metadata (`enrich.payload`, `enrich.matched`). The lookup resolution
+   * rides inside the effect journal, so replayed outputs are
+   * byte-identical.
+   */
+  static enrich(key: StoreExtractor, options: EnrichPipeOptions = {}): PipeOperation {
+    const wireForm: Record<string, unknown> = {
+      operation: "enrich",
+      key: indexFieldSpecWire(key, "enrich key"),
+      freshness: options.freshness ?? "latest",
+    };
+    if (options.named !== undefined) {
+      wireForm.named = enrichNamedKey(options.named);
+    }
+    wireForm.on_miss = options.onMiss ?? "forward";
+    return new PipeOperation("enrich", wireForm);
+  }
+
+  /**
+   * Accumulate each delivered record into fixed `windowNs`-wide panes of
+   * a managed StateStore view. Panes are immutable once written; declare
+   * `maxLateNs` or `watermarkNs` to bound late-event policy (and to let
+   * closed panes emit to a Feed) and `expireNs` to bound pane retention.
+   */
+  static window(
+    windowNs: number | bigint,
+    key: StoreExtractor,
+    aggregation: WindowAggregation,
+    options: WindowPipeOptions = {},
+  ): PipeOperation {
+    const width = u64Number(windowNs, "windowNs");
+    if (width <= 0) {
+      throw new Error("windowNs must be positive");
+    }
+    const wireForm: Record<string, unknown> = {
+      operation: "window",
+      window_ns: width,
+      key: indexFieldSpecWire(key, "window key"),
+      aggregation: windowAggregationWire(aggregation),
+      time: options.time ?? "event",
+    };
+    if (options.maxLateNs !== undefined) {
+      wireForm.max_late_ns = u64Number(options.maxLateNs, "maxLateNs");
+    }
+    if (options.watermarkNs !== undefined) {
+      wireForm.watermark_ns = u64Number(options.watermarkNs, "watermarkNs");
+    }
+    if (options.graceNs !== undefined) {
+      wireForm.grace_ns = u64Number(options.graceNs, "graceNs");
+    }
+    if (options.expireNs !== undefined) {
+      wireForm.expire_ns = u64Number(options.expireNs, "expireNs");
+    }
+    if (options.keyLimit !== undefined) {
+      wireForm.key_limit = u64Number(options.keyLimit, "keyLimit");
+    }
+    if (options.byteLimit !== undefined) {
+      wireForm.byte_limit = u64Number(options.byteLimit, "byteLimit");
+    }
+    return new PipeOperation("window", wireForm);
+  }
+
+  /** The wire object embedded under `operation` in `define_pipe`. */
+  toWire(): Record<string, unknown> {
+    return { ...this.wireForm };
+  }
+}
+
+/**
+ * Command u64 fields (`window_ns`, `max_late_ns`, …) travel as strict
+ * JSON numbers — never the decimal strings record nanoseconds use — so
+ * the exact-wire bound is the safe-integer range, not u64::MAX. A bigint
+ * beyond `Number.MAX_SAFE_INTEGER` cannot be carried exactly and is
+ * refused here rather than silently rounded.
+ */
+function u64Number(value: number | bigint, field: string): number {
+  if (typeof value === "bigint") {
+    if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `${field} must be within 0..${Number.MAX_SAFE_INTEGER}: ` +
+          "define_pipe u64 fields are strict JSON numbers and cannot " +
+          `carry ${value} exactly`,
+      );
+    }
+    return Number(value);
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+/** Lower a declared `IndexFieldSpec` onto the wire, validating the
+ * grammar the server enforces: KEY, METADATA 'name', or JSON 'path'
+ * (exactly what `Extractor.recordKey()/metadata()/json()` build). */
+function indexFieldSpecWire(spec: StoreExtractor, what: string): Record<string, unknown> {
+  if (typeof spec !== "object" || spec === null) {
+    throw new Error(
+      `${what} requires an IndexFieldSpec — ` +
+        "use Extractor.recordKey()/metadata()/json()",
+    );
+  }
+  switch (spec.kind) {
+    case "key":
+      return { kind: "key" };
+    case "metadata":
+      if (typeof spec.name !== "string" || spec.name.length === 0 || spec.name.length > 256) {
+        throw new Error(`${what} metadata extractor requires a name of 1-256 characters`);
+      }
+      return { kind: "metadata", name: spec.name };
+    case "projection":
+      if (
+        spec.extractor !== "json" ||
+        spec.version !== 1 ||
+        typeof spec.field !== "string" ||
+        spec.field.length === 0 ||
+        spec.field.length > 512
+      ) {
+        throw new Error(
+          `${what} accepts KEY, METADATA 'name', or JSON 'path' — ` +
+            "use Extractor.json(field)",
+        );
+      }
+      return { kind: "projection", extractor: "json", version: 1, field: spec.field };
+    default:
+      throw new Error(
+        `${what} accepts KEY, METADATA 'name', or JSON 'path' — ` +
+          "use Extractor.recordKey()/metadata()/json()",
+      );
+  }
+}
+
+/** Lower a `WindowAggregation` spec onto the wire. */
+function windowAggregationWire(aggregation: WindowAggregation): Record<string, unknown> {
+  if (typeof aggregation !== "object" || aggregation === null) {
+    throw new Error(
+      "window aggregation is required — " +
+        "use WindowAggregation.count()/sum()/average()",
+    );
+  }
+  switch (aggregation.aggregation) {
+    case "count":
+      return { aggregation: "count" };
+    case "sum":
+    case "average":
+      return {
+        aggregation: aggregation.aggregation,
+        value: indexFieldSpecWire(aggregation.value, `${aggregation.aggregation} value`),
+      };
+    default:
+      throw new Error(
+        "window aggregation must be count, sum, or average — " +
+          "use WindowAggregation.count()/sum()/average()",
+      );
+  }
+}
+
+/** The named-key grammar the server enforces on `enrich` `named`. */
+function enrichNamedKey(name: string): string {
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(name)) {
+    throw new Error(`invalid named key: ${name}`);
+  }
+  return name;
 }
 
 // ---------------------------------------------------------------------------

@@ -103,14 +103,14 @@ await client.defineWindowPipe(
   "orders.sub",
   "ops.order.counts",              // pane store (declared above)
   PipeOperation.window(
-    3_600_000_000_000n,            // windowNs: 1h
+    Time.h(1),                     // 1h panes
     Extractor.json("$.region"),
     WindowAggregation.sum(Extractor.json("$.total")),
     {
       time: "event",               // or "ingest"
-      watermarkNs: 300_000_000_000n, // event-time close horizon
-      graceNs: 60_000_000_000n,      // revise emitted panes up to 1min late
-      expireNs: 86_400_000_000_000n, // keep panes 24h
+      watermark: Time.m(5),        // event-time close horizon
+      grace: Time.m(1),            // revise emitted panes up to 1min late
+      expire: Time.d(1),           // keep panes 24h
       keyLimit: 10_000n,
     },
   ),
@@ -118,13 +118,17 @@ await client.defineWindowPipe(
 );
 ```
 
+Every window duration is a `Time` — `Time.h`, `Time.m`, `Time.s`,
+`Time.ms`, `Time.us`, `Time.d`, `Time.ns`. The SDK extracts nanoseconds
+internally for the wire; callers never spell raw nanosecond counts.
+
 ### Lateness models — pick exactly one
 
-- `maxLateNs` — ingest-clock bound; later arrivals quarantine into a
+- `maxLate` — ingest-clock bound; later arrivals quarantine into a
   countable `late` row.
-- `watermarkNs` — event-time horizon `max(event_time) − watermarkNs`
+- `watermark` — event-time horizon `max(event_time) − watermark`
   closes a pane once it passes the pane end (refused under `"ingest"`);
-  `graceNs` lets late events revise an emitted pane before counting into
+  `grace` lets late events revise an emitted pane before counting into
   `late`.
 
 An emit feed requires a declared lateness model.

@@ -181,28 +181,106 @@ export interface EnrichPipeOptions {
   onMiss?: EnrichMiss;
 }
 
-/** Options for {@link PipeOperation.window}. Every `*Ns` bound is a u64
- * duration in nanoseconds and travels as a strict JSON number — never a
- * decimal string — so values must fit the safe-integer range. */
+/**
+ * A length of time expressed in human units — {@link Time.h hours},
+ * {@link Time.m minutes}, {@link Time.s seconds}, {@link Time.ms
+ * milliseconds}, {@link Time.us microseconds}, {@link Time.d days}, or
+ * {@link Time.ns nanoseconds}. SDK calls that take a duration
+ * ({@link PipeOperation.window} and friends) accept a `Time`; the SDK
+ * extracts nanoseconds internally for the wire — callers never spell
+ * raw nanosecond counts.
+ */
+export class Time {
+  private constructor(readonly nanos: bigint) {}
+
+  /** Nanoseconds. */
+  static ns(nanoseconds: number | bigint): Time {
+    return Time.of(nanoseconds, 1, "nanoseconds");
+  }
+  /** Microseconds. */
+  static us(microseconds: number): Time {
+    return Time.of(microseconds, 1_000, "microseconds");
+  }
+  /** Milliseconds. */
+  static ms(milliseconds: number): Time {
+    return Time.of(milliseconds, 1_000_000, "milliseconds");
+  }
+  /** Seconds. */
+  static s(seconds: number): Time {
+    return Time.of(seconds, 1_000_000_000, "seconds");
+  }
+  /** Minutes. */
+  static m(minutes: number): Time {
+    return Time.of(minutes, 60_000_000_000, "minutes");
+  }
+  /** Hours. */
+  static h(hours: number): Time {
+    return Time.of(hours, 3_600_000_000_000, "hours");
+  }
+  /** Days. */
+  static d(days: number): Time {
+    return Time.of(days, 86_400_000_000_000, "days");
+  }
+
+  private static of(amount: number | bigint, unitNs: number, unit: string): Time {
+    if (typeof amount === "bigint") {
+      const nanos = amount * BigInt(unitNs);
+      if (nanos > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error(`${amount} ${unit} overflows the safe-integer range`);
+      }
+      return new Time(nanos);
+    }
+    if (!Number.isFinite(amount)) {
+      throw new Error(`${unit} requires a finite amount`);
+    }
+    const nanos = Math.round(amount * unitNs);
+    if (!Number.isSafeInteger(nanos)) {
+      throw new Error(`${amount} ${unit} overflows the safe-integer range`);
+    }
+    return new Time(BigInt(nanos));
+  }
+
+  /** `true` when this duration is greater than zero. */
+  isPositive(): boolean {
+    return this.nanos > 0n;
+  }
+
+  /** Compact rendering in the largest exact unit — `"1h"`, `"5m"`, `"30s"`. */
+  toString(): string {
+    const units: Array<[bigint, string]> = [
+      [86_400_000_000_000n, "d"], [3_600_000_000_000n, "h"],
+      [60_000_000_000n, "m"], [1_000_000_000n, "s"],
+      [1_000_000n, "ms"], [1_000n, "us"],
+    ];
+    if (this.nanos === 0n) return "0s";
+    for (const [unit, suffix] of units) {
+      if (this.nanos % unit === 0n) return `${this.nanos / unit}${suffix}`;
+    }
+    return `${this.nanos}ns`;
+  }
+}
+
+/** Options for {@link PipeOperation.window}. Durations are {@link Time}
+ * values — the SDK extracts nanoseconds internally for the wire. */
 export interface WindowPipeOptions {
   /** Which record clock assigns panes; default `"event"`. */
   time?: WindowTime;
   /** Lateness bound: a record arriving more than this far behind its own
    * `event_time_ns` quarantines into a countable `late` row. Event clock
-   * only; mutually exclusive with `watermarkNs`. */
-  maxLateNs?: number | bigint;
+   * only; mutually exclusive with `watermark`. */
+  maxLate?: Time;
   /** Event-time watermark: the driver closes a pane once the durable
-   * horizon `max(event_time) - watermarkNs` passes its end. Event clock
-   * only; mutually exclusive with `maxLateNs`. */
-  watermarkNs?: number | bigint;
-  /** Revision bound, requires `watermarkNs`: an event landing on an
+   * horizon `max(event_time) - watermark` passes its end. Event clock
+   * only; mutually exclusive with `maxLate`. */
+  watermark?: Time;
+  /** Revision bound, requires `watermark`: an event landing on an
    * already-emitted pane within the grace bound revises and re-emits it;
    * past the bound it counts into the `late` row. */
-  graceNs?: number | bigint;
+  grace?: Time;
   /** Pane-row retention bound: a pane row deletes once
-   * `pane_end + expireNs` is behind the close clock. Must exceed the
+   * `pane_end + expire` is behind the close clock. Must exceed the
    * declared lateness/revision bound so a pane provably closes first. */
-  expireNs?: number | bigint;
+  expire?: Time;
   /** Bound on distinct active group Keys held in pane/sentinel state
    * (the server accepts at most 512); unset leaves growth unbounded. */
   keyLimit?: number | bigint;
@@ -250,39 +328,62 @@ export class PipeOperation {
   }
 
   /**
-   * Accumulate each delivered record into fixed `windowNs`-wide panes of
+   * Accumulate each delivered record into fixed `window`-wide panes of
    * a managed StateStore view. Panes are immutable once written; declare
-   * `maxLateNs` or `watermarkNs` to bound late-event policy (and to let
-   * closed panes emit to a Feed) and `expireNs` to bound pane retention.
+   * `maxLate` or `watermark` to bound late-event policy (and to let
+   * closed panes emit to a Feed) and `expire` to bound pane retention.
+   * Every duration is a {@link Time} — `Time.h(1)`, `Time.m(5)`,
+   * `Time.s(30)`; the SDK extracts nanoseconds internally for the wire.
    */
   static window(
-    windowNs: number | bigint,
+    window: Time,
     key: StoreExtractor,
     aggregation: WindowAggregation,
     options: WindowPipeOptions = {},
   ): PipeOperation {
-    const width = u64Number(windowNs, "windowNs");
+    const width = durationNs(window, "window");
     if (width <= 0) {
-      throw new Error("windowNs must be positive");
+      throw new Error("window must be a positive Time");
+    }
+    const bounds: Array<[Time | undefined, string, string]> = [
+      [options.maxLate, "maxLate", "max_late_ns"],
+      [options.watermark, "watermark", "watermark_ns"],
+      [options.grace, "grace", "grace_ns"],
+      [options.expire, "expire", "expire_ns"],
+    ];
+    for (const [value, name] of bounds) {
+      if (value !== undefined && durationNs(value, name) <= 0) {
+        throw new Error(`${name} must be a positive Time when declared`);
+      }
+    }
+    if (options.maxLate !== undefined && options.watermark !== undefined) {
+      throw new Error(
+        "maxLate and watermark are alternative lateness models — declare exactly one",
+      );
+    }
+    const time = options.time ?? "event";
+    if (options.watermark !== undefined && time === "ingest") {
+      throw new Error(
+        "watermark is meaningless under the ingest clock — the horizon would " +
+          "follow arrival order, not event-time disorder",
+      );
+    }
+    if (options.grace !== undefined && options.watermark === undefined) {
+      throw new Error(
+        "grace requires watermark — revision bounds ride the event-time horizon",
+      );
     }
     const wireForm: Record<string, unknown> = {
       operation: "window",
       window_ns: width,
       key: indexFieldSpecWire(key, "window key"),
       aggregation: windowAggregationWire(aggregation),
-      time: options.time ?? "event",
+      time,
     };
-    if (options.maxLateNs !== undefined) {
-      wireForm.max_late_ns = u64Number(options.maxLateNs, "maxLateNs");
-    }
-    if (options.watermarkNs !== undefined) {
-      wireForm.watermark_ns = u64Number(options.watermarkNs, "watermarkNs");
-    }
-    if (options.graceNs !== undefined) {
-      wireForm.grace_ns = u64Number(options.graceNs, "graceNs");
-    }
-    if (options.expireNs !== undefined) {
-      wireForm.expire_ns = u64Number(options.expireNs, "expireNs");
+    for (const [value, , field] of bounds) {
+      if (value !== undefined) {
+        wireForm[field] = durationNs(value, field);
+      }
     }
     if (options.keyLimit !== undefined) {
       wireForm.key_limit = u64Number(options.keyLimit, "keyLimit");
@@ -297,6 +398,20 @@ export class PipeOperation {
   toWire(): Record<string, unknown> {
     return { ...this.wireForm };
   }
+}
+
+/**
+ * Extract the nanosecond count a {@link Time} carries — the wire
+ * encoding. `Time` construction already bounded values to the
+ * safe-integer range, so the extraction is exact.
+ */
+function durationNs(value: Time, field: string): number {
+  if (!(value instanceof Time)) {
+    throw new Error(
+      `${field} requires a Time — use Time.h()/.m()/.s()/.ms()/.us()/.d()/.ns()`,
+    );
+  }
+  return Number(value.nanos);
 }
 
 /**

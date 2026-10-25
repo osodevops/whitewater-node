@@ -2,6 +2,7 @@ import {
   Extractor,
   PipeOperation,
   StateStore,
+  Time,
   WhitewaterClient,
   WindowAggregation,
 } from "../dist/index.js";
@@ -84,10 +85,10 @@ await client.defineWindowPipe(
   "pipes.flow.agg",
   "pipes.panes",
   PipeOperation.window(
-    8_000_000_000, // u64 ns — strict JSON number, never a string
+    Time.s(8), // 8s panes — Time extracts the wire nanos internally
     Extractor.json("customer"),
     WindowAggregation.sum(Extractor.json("amount")),
-    { maxLateNs: 15_000_000_000 },
+    { maxLate: Time.s(15) },
   ),
   "pipes.emitted", // closed panes publish here (requires a lateness bound)
 );

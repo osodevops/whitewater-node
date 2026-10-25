@@ -166,12 +166,12 @@ await client.defineEnrichPipe("orders.enrich", "orders-sub",
   "orders.enrich-dlq");
 await client.defineWindowPipe("orders.hourly", "orders-sub",
   "stats.orders-hourly",
-  PipeOperation.window(3_600_000_000_000,  // window_ns: 1h
+  PipeOperation.window(Time.h(1),  // 1h panes
     Extractor.recordKey(), WindowAggregation.count(),
     { time: "event",
-      watermarkNs: 300_000_000_000,  // 5m horizon
-      graceNs: 30_000_000_000,       // 30s late revisions
-      expireNs: 7_200_000_000_000 }),
+      watermark: Time.m(5),   // 5m horizon
+      grace: Time.s(30),      // 30s late revisions
+      expire: Time.h(2) }),
   "orders.hourly-emitted");
 
 // Pipe lifecycle: describe, pause, resume, drop.

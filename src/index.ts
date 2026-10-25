@@ -28,6 +28,7 @@ export {
   indexPredicate,
   Pipe,
   PipeOperation,
+  Time,
   WindowAggregation,
 } from "./operations.js";
 export type {

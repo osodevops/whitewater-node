@@ -598,7 +598,7 @@ export class WhitewaterClient {
    * `DEFINE PIPE ... TO STATESTORE <store>` — rolling-window
    * aggregation. `operation` must be {@link PipeOperation.window};
    * `emitFeed` optionally publishes closed panes and requires the
-   * operation declare a lateness bound (`maxLateNs` or `watermarkNs`).
+   * operation declare a lateness bound (`maxLate` or `watermark`).
    */
   defineWindowPipe(
     name: string,

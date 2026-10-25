@@ -88,6 +88,11 @@ describe("WCL builders", () => {
 
     await client.createSubscription("team", "orders.events", ReaderStart.now());
     expect(script()).toBe("CREATE SUBSCRIPTION team FROM orders.events START AT NOW");
+
+    await client.createSubscription("orders.sub", "orders.events", ReaderStart.beginning());
+    expect(script()).toBe(
+      "CREATE SUBSCRIPTION orders.sub FROM orders.events START AT BEGINNING",
+    );
   });
 
   it("sessions and seek", async () => {
@@ -126,10 +131,14 @@ describe("WCL builders", () => {
     expect(() => client.createFeed(".leading")).toThrow("invalid dotted name");
     expect(() => client.createDomain("two words")).toThrow("invalid dotted name");
     expect(() => client.createWriter("bad;name", "orders.events")).toThrow(
-      "invalid resource name",
+      "invalid dotted name",
     );
     expect(() => client.createReader("a'b", "orders.events")).toThrow(
-      "invalid resource name",
+      "invalid dotted name",
+    );
+    // resource names share the server's dotted grammar — no hyphens
+    expect(() => client.createSubscription("orders-sub", "orders.events")).toThrow(
+      "invalid dotted name",
     );
     expect(() => client.renameDomain("orders", "INJECTION; DROP")).toThrow(
       "invalid dotted name",

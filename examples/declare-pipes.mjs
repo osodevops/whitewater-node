@@ -57,24 +57,20 @@ await client.stateStores.define(
   StateStore.named("pipes.panes").addKey("key").addKey("pane"),
 );
 
-// Subscriptions are dotted names; the typed createSubscription helper
-// takes single-segment resource names, so declare via WCL (the same
-// typed commands the fixtures use).
-for (const sub of ["pipes.flow_copy", "pipes.flow_enrich", "pipes.flow_agg"]) {
-  await client.wcl(
-    `CREATE SUBSCRIPTION ${sub} FROM pipes.in START AT BEGINNING`,
-  );
+// Subscriptions are dotted resource names — one per Pipe.
+for (const sub of ["pipes.flow.copy", "pipes.flow.enrich", "pipes.flow.agg"]) {
+  await client.createSubscription(sub, "pipes.in");
 }
 
 // ---- forward: copy pipes.in -> pipes.out -------------------------------
 
-await client.defineForwardPipe("pipes.copy", "pipes.flow_copy", "pipes.out");
+await client.defineForwardPipe("pipes.copy", "pipes.flow.copy", "pipes.out");
 
 // ---- enrich: lookup pipes.profiles by record Key, misses quarantine ----
 
 await client.defineEnrichPipe(
   "pipes.enrich",
-  "pipes.flow_enrich",
+  "pipes.flow.enrich",
   "pipes.enriched",
   "pipes.profiles",
   PipeOperation.enrich(Extractor.recordKey(), { onMiss: "quarantine" }),
@@ -85,7 +81,7 @@ await client.defineEnrichPipe(
 
 await client.defineWindowPipe(
   "pipes.agg",
-  "pipes.flow_agg",
+  "pipes.flow.agg",
   "pipes.panes",
   PipeOperation.window(
     8_000_000_000, // u64 ns — strict JSON number, never a string

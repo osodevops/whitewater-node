@@ -31,9 +31,9 @@ const client = new WhitewaterClient({
 // Plane state, not a per-session object.
 await client.createDomain("demo");
 await client.createFeed("demo.tail");
-await client.createReader("demo-reader", "demo.tail", ReaderStart.beginning());
+await client.createReader("demo.reader", "demo.tail", ReaderStart.beginning());
 
-const reader = client.reader("demo-reader");
+const reader = client.reader("demo.reader");
 
 // open() fences this client as the session owner. Another client
 // opening the same Reader supersedes this session (stale_epoch on the

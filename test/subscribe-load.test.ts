@@ -155,7 +155,7 @@ describe("subscribe + load", () => {
       resolveDelivery = resolve;
     });
     const sub = client.subscribe(
-      "hr-view",
+      "hr.view",
       "hr.employees",
       ReaderStart.beginning(),
       (records) => {
@@ -184,7 +184,7 @@ describe("subscribe + load", () => {
         let response: unknown = {};
         if (path === "/v1/admin/wcl") {
           status = 400;
-          response = { error: "Reader hr-view already exists" };
+          response = { error: "Reader hr.view already exists" };
         } else if (path === "/v1/readers/open") {
           status = 400;
           response = { error: "stale session epoch", code: "stale_epoch" };
@@ -201,7 +201,7 @@ describe("subscribe + load", () => {
           apiKey: "test-key",
           endpoints: [`http://127.0.0.1:${port}`],
         });
-        const sub = c.subscribe("hr-view", "hr.employees", ReaderStart.now(), () => {},
+        const sub = c.subscribe("hr.view", "hr.employees", ReaderStart.now(), () => {},
           (error) => {
             errors.push(error);
             resolve();

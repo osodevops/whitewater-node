@@ -1217,10 +1217,8 @@ function dotted(name: string): string {
   return name;
 }
 
-/** Single-segment resource names (writers, readers, subscriptions, roles). */
+/** Resource names (writers, readers, subscriptions, roles) share the
+ * same dotted grammar the server validates. */
 function resource(name: string): string {
-  if (!/^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name)) {
-    throw new Error(`invalid resource name: ${name}`);
-  }
-  return name;
+  return dotted(name);
 }

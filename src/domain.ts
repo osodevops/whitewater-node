@@ -21,8 +21,8 @@ function dotted(name: string): string {
 type Row = Record<string, unknown>;
 
 /** One side of a Feed's schema metadata — format plus optional
- * subject/definition text. Formats: `text`, `json`, `protobuf`,
- * `avro`, `custom.<name>`. Records stay schema-neutral bytes on the
+ * subject/definition text. Formats: `json`, `jsonschema`, `avro`,
+ * `protobuf`, `text`, `bytes`, or `custom.<name>`. Records stay schema-neutral bytes on the
  * wire; declarations are catalog metadata for tooling and
  * compatibility — not yet an enforced registry. */
 export interface SchemaDecl {

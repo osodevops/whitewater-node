@@ -8,7 +8,7 @@ The contract in one line: **resolve = processed, reject = replay** —
 the SDK acks a page only after every record in it has been handled.
 
 ```ts
-import { ReaderStart, WhitewaterClient } from "whitewater-client";
+import { codecs, ReaderStart, WhitewaterClient } from "whitewater-client";
 
 const client = new WhitewaterClient({
   apiKey: process.env.WHITEWATER_API_KEY!,
@@ -22,13 +22,16 @@ await shop.createFeed("orders");
 await shop.createFeed("orders.dlq");          // dead-letter feed
 
 // ---- produce (usually a different service) ---------------------------
-const writer = await shop.createWriter("orders").writerId("orders.ingest").open();
-await writer.append("order-1", Buffer.from('{"total":42}'));
+// Bind codecs on the Feed handle — the SDK serializes, never Buffer.from.
+const orders = shop.feed("orders", codecs.utf8());   // JSON text payloads
+const writer = await shop.createWriter(orders).writerId("orders.ingest").open();
+await writer.append("order-1", '{"total":42}');
 
 // ---- consume ----------------------------------------------------------
-const deadLetter = await shop.createWriter("orders.dlq")
+const dlq = shop.feed("orders.dlq", codecs.utf8());
+const deadLetter = await shop.createWriter(dlq)
   .writerId("fulfillment.dlq").open();
-const reader = await shop.createReader("orders")
+const reader = await shop.createReader(orders)
   .readerId("fulfillment")                     // durable id — survives restarts
   .readerStartPoint(ReaderStart.BEGINNING)     // first-declare only
   .maxPageSize(250)                            // max records per fetch page

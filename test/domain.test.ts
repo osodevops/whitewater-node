@@ -236,8 +236,8 @@ describe("Domain-scoped builders + forEach", () => {
   it("createWriter/createReader resolve relative names inside the Domain", async () => {
     const shop = await client.getDomain("shop");
     await shop.createFeed("orders");
-    const writer = await shop.createWriter("orders").writerId("ingest").open();
-    await writer.append("order-1", Buffer.from("1"));
+    const writer = await shop.createWriter(shop.feed("orders", codecs.utf8())).writerId("ingest").open();
+    await writer.append("order-1", "1");
 
     const reader = await shop
       .createReader("orders")
@@ -252,9 +252,9 @@ describe("Domain-scoped builders + forEach", () => {
   it("reader.forEach acks handled pages and replays the unacked tail", async () => {
     const shop = client.domain("shop");
     await shop.createFeed("orders");
-    const writer = await shop.createWriter("orders").writerId("w").open();
-    await writer.append("a", Buffer.from("1"));
-    await writer.append("b", Buffer.from("2"));
+    const writer = await shop.createWriter(shop.feed("orders", codecs.utf8())).writerId("w").open();
+    await writer.append("a", "1");
+    await writer.append("b", "2");
 
     const reader = await shop
       .createReader("orders")
@@ -278,8 +278,8 @@ describe("Domain-scoped builders + forEach", () => {
   it("for await iterates records per page", async () => {
     const shop = client.domain("shop");
     await shop.createFeed("orders");
-    const writer = await shop.createWriter("orders").writerId("w").open();
-    await writer.append("a", Buffer.from("1"));
+    const writer = await shop.createWriter(shop.feed("orders", codecs.utf8())).writerId("w").open();
+    await writer.append("a", "1");
     const reader = await shop
       .createReader("orders")
       .readerId("iter")
@@ -314,10 +314,10 @@ describe("ReaderBuilder", () => {
   it("declares + opens a typed reader end to end", async () => {
     const shop = client.domain("shop");
     const writer = await client
-      .createWriter(shop, "orders")
+      .createWriter(shop, shop.feed("orders", codecs.utf8()))
       .writerId("orders.ingest")
       .open();
-    await writer.append("order-1", Buffer.from('{"total":9}'));
+    await writer.append("order-1", '{"total":9}');
 
     const reader = await client
       .createReader(shop, shop.feed("orders"))
@@ -395,13 +395,13 @@ describe("WriterBuilder", () => {
       .createWriter(client.domain("shop"), "orders")
       .writerId("orders.ingest")
       .open();
-    await writer.append("k1", Buffer.from("payload"));
+    await writer.append("k1", "payload");
   });
 
   it("requires writerId before open/declare", async () => {
     const shop = client.domain("shop");
-    expect(() => client.createWriter(shop, "orders").open()).toThrow(/writerId/);
-    expect(() => client.createWriter(shop, "orders").declare()).toThrow(
+    expect(() => client.createWriter(shop, shop.feed("orders", codecs.utf8())).open()).toThrow(/writerId/);
+    expect(() => client.createWriter(shop, shop.feed("orders", codecs.utf8())).declare()).toThrow(
       /writerId/,
     );
   });

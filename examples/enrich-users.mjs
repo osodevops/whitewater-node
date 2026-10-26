@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { codecs, WhitewaterClient } from "../dist/index.js";
+import { codecs, textMetadata, WhitewaterClient } from "../dist/index.js";
 
 /**
  * Permanent enrichment consumer — the Whitewater equivalent of a Kafka
@@ -85,7 +85,7 @@ async function process(msg) {
         sourceCursor: msg.cursor,
         original: req,
       },
-      metadata: { reason: Buffer.from("enrichment-miss") },
+      metadata: textMetadata({ reason: "enrichment-miss" }),
     });
     return;
   }

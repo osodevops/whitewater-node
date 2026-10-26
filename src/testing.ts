@@ -247,6 +247,7 @@ export class FakeRiverbed {
   private readonly stores = new Map<string, FakeStore>();
   private readonly pipes = new Map<string, Json>();
   private readonly domains = new Map<string, { id: string; createdAtNs: bigint }>();
+  private readonly schemas = new Map<string, Json>();
   private readonly roles = new Set<string>();
   private readonly roleIds = new Map<string, string>();
   /** `${feed}:${writer_session_id}` → last committed sequence (raw path). */
@@ -562,6 +563,32 @@ export class FakeRiverbed {
       this.roleIds.set(m[1], randomUUID());
       return ok();
     }
+    if (
+      (m = /^SET\s+SCHEMA\s+ON\s+(DOMAIN|FEED)\s+(\S+)\s+(.+)$/i.exec(text))
+    ) {
+      // SET SCHEMA ON DOMAIN|FEED <name> (KEY|VALUE <fmt> [SUBJECT 's'] [DEFINITION 'd'])+
+      const key = m[1].toLowerCase() + ":" + m[2];
+      const schema: Json = { ...(this.schemas.get(key) ?? {}) };
+      const clause = /(KEY|VALUE)\s+(\S+)((?:\s+(?:SUBJECT|DEFINITION)\s+'(?:[^']|'')*')*)/gi;
+      let side;
+      while ((side = clause.exec(m[3])) !== null) {
+        const decl: Json = { format: side[2].toLowerCase() };
+        const attrs = /(SUBJECT|DEFINITION)\s+'((?:[^']|'')*)'/gi;
+        let attr;
+        while ((attr = attrs.exec(side[3])) !== null) {
+          decl[attr[1].toLowerCase()] = attr[2].replace(/''/g, "'");
+        }
+        schema[side[1].toLowerCase()] = decl;
+      }
+      this.schemas.set(key, schema);
+      return ok();
+    }
+    if (
+      (m = /^DROP\s+SCHEMA\s+ON\s+(DOMAIN|FEED)\s+(\S+)$/i.exec(text))
+    ) {
+      this.schemas.delete(m[1].toLowerCase() + ":" + m[2]);
+      return ok();
+    }
     if ((m = /^DROP\s+(FEED|WRITER|READER|SUBSCRIPTION|DOMAIN|ROLE)\s+(\S+)$/i.exec(text))) {
       this.drop(m[1].toUpperCase(), m[2]);
       return ok();
@@ -601,6 +628,7 @@ export class FakeRiverbed {
           domain_id: d.id,
           status: "active",
           created_at_ns: d.createdAtNs.toString(10),
+          schema: this.schemas.get("domain:" + (name ?? "")) ?? null,
         };
       }
       case "feeds": {
@@ -611,6 +639,8 @@ export class FakeRiverbed {
           space_id: this.spaceIdOf(f.name),
           status: "active",
           created_at_ns: f.createdAtNs.toString(10),
+          schema: this.schemas.get("feed:" + f.name) ?? null,
+          effective_schema: this.effectiveSchema(f.name),
         };
       }
       case "writers": {
@@ -687,6 +717,17 @@ export class FakeRiverbed {
       default:
         return { name: name ?? String(item) };
     }
+  }
+
+  /** The feed's declared schema layered over its Domain's — the
+   * feed's sides win; missing sides inherit. */
+  private effectiveSchema(feedName: string): Json | null {
+    const own = this.schemas.get("feed:" + feedName);
+    const domain = feedName.split(".")[0];
+    const inherited = this.schemas.get("domain:" + domain);
+    if (own === undefined) return inherited ?? null;
+    if (inherited === undefined) return own;
+    return { ...inherited, ...own };
   }
 
   /** `DESCRIBE <kind> <name>` — the row, or a refusal when missing. */
@@ -849,6 +890,12 @@ export class FakeRiverbed {
         return [];
       case "PIPES":
         return [...this.pipes.values()].map((p) => this.resourceRow("pipes", p));
+      case "SCHEMAS":
+        return [...this.schemas.entries()].map(([key, schema]) => ({
+          scope_kind: key.split(":")[0],
+          name: key.split(":").slice(1).join(":"),
+          schema,
+        }));
       default:
         return [];
     }
@@ -913,6 +960,19 @@ export class FakeRiverbed {
       case "resume_pipe": {
         const pipe = this.pipes.get(str(command.name));
         if (pipe) pipe.stage = "declared";
+        return ok();
+      }
+      case "set_schema": {
+        const scope = command.scope as Json;
+        this.schemas.set(
+          String(scope.kind) + ":" + String(scope.name),
+          { ...(command.schema as Json) },
+        );
+        return ok();
+      }
+      case "clear_schema": {
+        const scope = command.scope as Json;
+        this.schemas.delete(String(scope.kind) + ":" + String(scope.name));
         return ok();
       }
       case "describe": {

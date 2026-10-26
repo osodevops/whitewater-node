@@ -20,12 +20,63 @@ function dotted(name: string): string {
 
 type Row = Record<string, unknown>;
 
+/** One side of a Feed's schema metadata — format plus optional
+ * subject/definition text. Formats: `text`, `json`, `protobuf`,
+ * `avro`, `custom.<name>`. Records stay schema-neutral bytes on the
+ * wire; declarations are catalog metadata for tooling and
+ * compatibility — not yet an enforced registry. */
+export interface SchemaDecl {
+  format: string;
+  subject?: string;
+  definition?: string;
+}
+
+/** The declared key/value schema pair — either side may be absent. A
+ * Feed's declaration overrides the named sides of its Domain default. */
+export interface FeedSchema {
+  key?: SchemaDecl;
+  value?: SchemaDecl;
+}
+
+export function feedSchemaToWire(schema: FeedSchema): Row {
+  const side = (decl: SchemaDecl | undefined): Row | undefined => {
+    if (decl === undefined) return undefined;
+    const out: Row = { format: decl.format };
+    if (decl.subject !== undefined) out.subject = decl.subject;
+    if (decl.definition !== undefined) out.definition = decl.definition;
+    return out;
+  };
+  const out: Row = {};
+  const key = side(schema.key);
+  const value = side(schema.value);
+  if (key !== undefined) out.key = key;
+  if (value !== undefined) out.value = value;
+  return out;
+}
+
+function schemaDeclFrom(row: unknown): SchemaDecl | undefined {
+  if (row == null || typeof row !== "object") return undefined;
+  const r = row as Row;
+  return { format: String(r.format), ...(r.subject !== undefined ? { subject: String(r.subject) } : {}), ...(r.definition !== undefined ? { definition: String(r.definition) } : {}) };
+}
+
+function feedSchemaFrom(row: unknown): FeedSchema | null {
+  if (row == null || typeof row !== "object") return null;
+  const r = row as Row;
+  const key = schemaDeclFrom(r.key);
+  const value = schemaDeclFrom(r.value);
+  if (key === undefined && value === undefined) return null;
+  return { ...(key ? { key } : {}), ...(value ? { value } : {}) };
+}
+
 interface Snapshot {
   domainId: string;
   describe: Row;
   revision: number;
   feeds: string[];
   feedIds: Set<string>;
+  feedSchemas: Map<string, FeedSchema | null>;
+  declaredSchemas: Map<string, FeedSchema | null>;
   readers: string[];
   writers: string[];
   subscriptions: string[];
@@ -90,6 +141,25 @@ export class Domain {
   /** The declared History Policy row, or null when unset. */
   async historyPolicy(): Promise<Row | null> {
     return ((await this.snap()).describe.history_policy as Row | undefined) ?? null;
+  }
+
+  /** The Domain's declared schema default — null when undeclared.
+   * Every Feed without its own declaration inherits it. */
+  async schema(): Promise<FeedSchema | null> {
+    return feedSchemaFrom((await this.snap()).describe.schema);
+  }
+
+  /** The effective schema for a Feed — its declared sides layered over
+   * the Domain default. Null when nothing is declared anywhere
+   * (schema-neutral bytes). */
+  async feedSchema(feed: string): Promise<FeedSchema | null> {
+    return (await this.snap()).feedSchemas.get(feed) ?? null;
+  }
+
+  /** Only the sides the Feed itself declares — null when it inherits
+   * the Domain default wholesale. */
+  async declaredFeedSchema(feed: string): Promise<FeedSchema | null> {
+    return (await this.snap()).declaredSchemas.get(feed) ?? null;
   }
 
   // ---- scoped resources -------------------------------------------------
@@ -217,10 +287,15 @@ export class Domain {
 
     const feeds: string[] = [];
     const feedIds = new Set<string>();
+    const feedSchemas = new Map<string, FeedSchema | null>();
+    const declaredSchemas = new Map<string, FeedSchema | null>();
     for (const row of rows(results[1]?.data)) {
       if (row.space_id === domainId) {
-        feeds.push(String(row.name));
+        const name = String(row.name);
+        feeds.push(name);
         feedIds.add(String(row.feed_id));
+        feedSchemas.set(name, feedSchemaFrom(row.effective_schema));
+        declaredSchemas.set(name, feedSchemaFrom(row.schema));
       }
     }
     feeds.sort();
@@ -237,6 +312,8 @@ export class Domain {
       revision: execution.revision,
       feeds,
       feedIds,
+      feedSchemas,
+      declaredSchemas,
       readers: scoped(2, "feed_id", feedIds),
       writers: scoped(3, "feed_id", feedIds),
       subscriptions: scoped(4, "space_id", new Set([domainId])),

@@ -7,7 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 import { codecs, type Codec } from "./codecs.js";
-import { asFeed, Domain, ReaderBuilder, WriterBuilder } from "./domain.js";
+import { asFeed, Domain, feedSchemaToWire, ReaderBuilder, WriterBuilder, type FeedSchema } from "./domain.js";
 import { AmbiguousResult, Conflict, Unavailable, WhitewaterError } from "./errors.js";
 import { Feed } from "./feed.js";
 import {
@@ -692,6 +692,40 @@ export class WhitewaterClient {
   // fails locally rather than reaching the Control Plane.
 
   /** `CREATE DOMAIN <name>` */
+  /** `SET SCHEMA ON DOMAIN <name>` — the Domain's inherited default. */
+  async setDomainSchema(domain: string, schema: FeedSchema): Promise<ControlExecution> {
+    return this.commands([{
+      command: "set_schema",
+      scope: { kind: "domain", name: dotted(domain) },
+      schema: feedSchemaToWire(schema),
+    }]);
+  }
+
+  /** `SET SCHEMA ON FEED <feed>` — overrides the named sides. */
+  async setFeedSchema(feed: string, schema: FeedSchema): Promise<ControlExecution> {
+    return this.commands([{
+      command: "set_schema",
+      scope: { kind: "feed", name: dotted(feed) },
+      schema: feedSchemaToWire(schema),
+    }]);
+  }
+
+  /** `DROP SCHEMA ON DOMAIN <name>` — clears the declared default. */
+  async clearDomainSchema(domain: string): Promise<ControlExecution> {
+    return this.commands([{
+      command: "clear_schema",
+      scope: { kind: "domain", name: dotted(domain) },
+    }]);
+  }
+
+  /** `DROP SCHEMA ON FEED <feed>` — reverts to Domain inheritance. */
+  async clearFeedSchema(feed: string): Promise<ControlExecution> {
+    return this.commands([{
+      command: "clear_schema",
+      scope: { kind: "feed", name: dotted(feed) },
+    }]);
+  }
+
   createDomain(name: string): Promise<ControlExecution> {
     return this.wcl(`CREATE DOMAIN ${dotted(name)}`);
   }

@@ -115,6 +115,74 @@ describe("typed Domain facade", () => {
     const feed = domain.feed("orders", codecs.json<Order>());
     expect(feed).toBeInstanceOf(Feed);
   });
+
+  it("layers a Feed's schema declaration over the Domain default", async () => {
+    const shop = await seeded();
+    await client.setDomainSchema("shop", {
+      value: { format: "json", subject: "order-v1" },
+    });
+    await client.setFeedSchema("shop.orders", { key: { format: "text" } });
+    await shop.refresh();               // snapshot cached the pre-schema catalog
+
+    const domain = await shop.schema();
+    expect(domain?.value?.format).toBe("json");
+    expect(domain?.value?.subject).toBe("order-v1");
+
+    const effective = await shop.feedSchema("shop.orders");
+    expect(effective?.key?.format).toBe("text");
+    expect(effective?.value?.format).toBe("json");       // inherited
+    const declared = await shop.declaredFeedSchema("shop.orders");
+    expect(declared?.key?.format).toBe("text");
+    expect(declared?.value).toBeUndefined();
+
+    const inherited = await shop.feedSchema("shop.returns");
+    expect(inherited?.value?.format).toBe("json");
+    expect(inherited?.key).toBeUndefined();
+    expect(await shop.declaredFeedSchema("shop.returns")).toBeNull();
+  });
+
+  it("DROP SCHEMA reverts a Feed to Domain inheritance", async () => {
+    const shop = await seeded();
+    await client.setDomainSchema("shop", { value: { format: "json" } });
+    await client.setFeedSchema("shop.orders", { value: { format: "avro" } });
+    await shop.refresh();
+    expect((await shop.feedSchema("shop.orders"))?.value?.format).toBe("avro");
+
+    await client.clearFeedSchema("shop.orders");
+    await shop.refresh();
+    expect((await shop.feedSchema("shop.orders"))?.value?.format).toBe("json");
+    expect(await shop.declaredFeedSchema("shop.orders")).toBeNull();
+  });
+
+  it("SET SCHEMA over WCL + SHOW SCHEMAS + DESCRIBE FEED agree", async () => {
+    const shop = await seeded();
+    await client.wcl(
+      "SET SCHEMA ON DOMAIN shop VALUE json SUBJECT 'order-v1';" +
+      " SET SCHEMA ON FEED shop.orders KEY protobuf DEFINITION 'syntax = proto3'",
+    );
+    await shop.refresh();
+    const rows = (await client.wcl("SHOW SCHEMAS")).results[0].data as Array<{
+      scope_kind: string;
+      name: string;
+      schema: Record<string, { format: string; subject?: string }>;
+    }>;
+    const byScope = new Map(rows.map((r) => [r.scope_kind + ":" + r.name, r.schema]));
+    expect(byScope.get("domain:shop")?.value?.subject).toBe("order-v1");
+    expect(byScope.get("feed:shop.orders")?.key?.format).toBe("protobuf");
+
+    const described = (await client.commands([
+      { command: "describe", kind: "feed", name: "shop.orders" },
+    ])).results[0].data as {
+      schema: { key: { format: string } };
+      effective_schema: { value: { format: string } };
+    };
+    expect(described.schema.key.format).toBe("protobuf");
+    expect(described.effective_schema.value.format).toBe("json");
+
+    const effective = await shop.feedSchema("shop.orders");
+    expect(effective?.key?.format).toBe("protobuf");
+    expect(effective?.value?.format).toBe("json");
+  });
 });
 
 describe("ReaderBuilder", () => {

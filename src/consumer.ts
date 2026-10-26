@@ -41,7 +41,7 @@ type QueueItem<K, V> = FeedMessage<K, V> | Error | typeof END;
  */
 export class FeedConsumer<K, V> implements AsyncIterable<FeedMessage<K, V>> {
   private start: ReaderStart | undefined;
-  private capacityValue: number | undefined;
+  private maxPageSizeValue: number | undefined;
   private initialBackoffMs = 250;
   private maxBackoffMs = 30_000;
   private onRecordHandler?: (message: FeedMessage<K, V>) => void | Promise<void>;
@@ -69,9 +69,9 @@ export class FeedConsumer<K, V> implements AsyncIterable<FeedMessage<K, V>> {
     return this;
   }
 
-  /** Records fetched per page (default 128). */
-  capacity(capacity: number): this {
-    this.capacityValue = capacity;
+  /** Max records delivered per page (default 128). */
+  maxPageSize(maxPageSize: number): this {
+    this.maxPageSizeValue = maxPageSize;
     return this;
   }
 
@@ -127,7 +127,7 @@ export class FeedConsumer<K, V> implements AsyncIterable<FeedMessage<K, V>> {
         const sub = this.subscribeDecoded(
           this.readerName,
           this.start,
-          this.capacityValue,
+          this.maxPageSizeValue,
           async (messages) => {
             for (const message of messages) {
               try {

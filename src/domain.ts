@@ -103,7 +103,7 @@ interface Snapshot {
  *   .createReader(shop, shop.feed("orders"))
  *   .readerId("fulfillment")                        // the Kafka groupId analogue
  *   .readerStartPoint(ReaderStart.BEGINNING)
- *   .capacity(256)
+ *   .maxPageSize(256)
  *   .open();                                        // FeedReader<string, Buffer>
  * ```
  *
@@ -373,7 +373,7 @@ function rows(data: unknown): Row[] {
 export class ReaderBuilder<K, V> {
   private id: string | null = null;
   private start: ReaderStart = readerStart.beginning();
-  private pageCapacity = 128;
+  private pageSize = 128;
 
   /** @internal — build via {@link WhitewaterClient.createReader}. */
   constructor(
@@ -396,10 +396,10 @@ export class ReaderBuilder<K, V> {
     return this;
   }
 
-  /** Bounded fetch page capacity — the default is 128. */
-  capacity(capacity: number): this {
-    if (!(capacity > 0)) throw new Error("capacity must be positive");
-    this.pageCapacity = capacity;
+  /** Max records delivered per fetch page — the default is 128. */
+  maxPageSize(maxPageSize: number): this {
+    if (!(maxPageSize > 0)) throw new Error("maxPageSize must be positive");
+    this.pageSize = maxPageSize;
     return this;
   }
 
@@ -413,7 +413,7 @@ export class ReaderBuilder<K, V> {
    * its start and durable progress), open a session, and bind the
    * Feed's codecs — `fetch` returns decoded `FeedMessage`s. */
   open(): Promise<FeedReader<K, V>> {
-    return this.bound.reader(this.requireId(), this.pageCapacity, this.start);
+    return this.bound.reader(this.requireId(), this.pageSize, this.start);
   }
 
   private requireId(): string {

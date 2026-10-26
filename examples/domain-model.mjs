@@ -47,7 +47,7 @@ const reader = await client
   .createReader(shop, orders)
   .readerId("fulfillment") // durable id — the Kafka groupId analogue
   .readerStartPoint(ReaderStart.BEGINNING) // first-declare only
-  .capacity(256)
+  .maxPageSize(256)
   .open();
 const page = await reader.fetch();
 for (const record of page.records) {

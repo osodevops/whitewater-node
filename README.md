@@ -112,7 +112,7 @@ const reader = await shop
   .createReader("orders")
   .readerId("fulfillment")                        // durable id — the Kafka groupId analogue
   .readerStartPoint(ReaderStart.BEGINNING)        // first-declare only
-  .capacity(256)
+  .maxPageSize(256)
   .open();
 await reader.forEach(async (m) => handle(m.value)); // per-record pump: deliver → ack each page
 // or iterate: `for await (const m of reader)` — same ack-per-page semantics
@@ -178,7 +178,7 @@ await inFeed.consumer("enricher").onRecord(process).run();
   denied auth) — everything after the first open is supervised forever
   until `consumer.close()` (safe from signal handlers and from inside
   a handler; the in-flight page finishes and acks first).
-- `.startAt(...)`, `.capacity(n)`, `.backoff(ms, ms)`, `.onError(fn)`,
+- `.startAt(...)`, `.maxPageSize(n)`, `.backoff(ms, ms)`, `.onError(fn)`,
   `.lastError`, `.isRunning`, `runAsync(handler)` tune and observe it;
   `feed.subscribe` remains for page-oriented control.
 
@@ -290,9 +290,9 @@ escape hatches for the same wire contract.
 | Schemas | `setDomainSchema` `setFeedSchema` `clearDomainSchema` `clearFeedSchema` · `Domain.schema()` `feedSchema()` `declaredFeedSchema()` · `SchemaDecl`/`FeedSchema` — `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`, `custom.<name>` |
 | Feeds | `feed(name[, keyCodec, valueCodec])` → `Feed<K,V>` · `useCompression` · `records()` `fetch()` `load()` · `writer` `append` `reader` `subscribe` `subscribeDecoded` `consumer` |
 | Writing | `FeedWriter.append(key, value)` `appendEvent` `appendAll` · `useCompression` `sessionEpoch` · idempotent `requestId` · `FeedEvent` carries event time + Metadata |
-| Reading | `FeedReader.fetch(limit)` `ack()` `ackCursor` `close()` · `sessionEpoch` · durable `readerId` · `ReaderStart` — `BEGINNING`, `END`, `now()`, `cursor`, `timestamp(Date)` |
+| Reading | `FeedReader.forEach(handler)` pump · `for await (const m of reader)` async iterator — event-loop driven, no threads · `fetch(limit)` `ack()` `ackCursor` `close()` · `sessionEpoch` · durable `readerId` · `ReaderStart` — `BEGINNING`, `END`, `now()`, `cursor`, `timestamp(Date)` |
 | Temporary fetches | `Feed.fetch(after, limit)` / `FeedClient.temporaryFetch` — `after_event_time_ns` seeks, `new_only`, `tail` + `wait_ms` long-poll · `Feed.records` `Feed.load` |
-| Consumers | `feed.consumer(reader)` → `FeedConsumer`: `startAt` `capacity` `onRecord` `onError` `backoff` · `run` / `runAsync` / `close` |
+| Consumers | `feed.consumer(reader)` → `FeedConsumer`: `startAt` `maxPageSize` `onRecord` `onError` `backoff` · `run` / `runAsync` / `close` |
 | Subscription members | `subscriptionMember(name)` → `join` `claim` `renew` `release` `fetch` `ack` — shared progress + RF3 work leases · `feed.subscribe`/`subscribeDecoded` managed loop |
 | StateStores | `store(name)` → `Store<K,V>`: `put` `get` `getBy` `find` `findBy` `getOrDefault` `delete` `page` `iterate` (async gen) `clear` `drop` `raw` · `stateStore(name)` byte-level · `stateStores.define(spec)` `drop` |
 | Indexes | `queryIndex(name, IndexPredicate)` → `IndexPage` · `IndexPredicate.exact/prefix/range` + `IndexBound` |

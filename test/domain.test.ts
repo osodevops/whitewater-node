@@ -260,7 +260,7 @@ describe("Domain-scoped builders + forEach", () => {
       .createReader("orders")
       .readerId("pump")
       .readerStartPoint(ReaderStart.BEGINNING)
-      .capacity(1)
+      .maxPageSize(1)
       .open();
     const seen: string[] = [];
     await reader.forEach((m) => {

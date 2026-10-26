@@ -1004,14 +1004,14 @@ export class WhitewaterClient {
     start: ReaderStart,
     onRecords: (records: FeedRecord[]) => void | Promise<void>,
     onError?: (error: WhitewaterError) => void,
-    capacity = SUBSCRIBE_CAPACITY,
+    maxPageSize = SUBSCRIBE_CAPACITY,
   ): Subscription {
     return new Subscription(
       this,
       reader,
       feed,
       start,
-      capacity,
+      maxPageSize,
       onRecords,
       onError,
     );

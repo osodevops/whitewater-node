@@ -364,11 +364,11 @@ export class Feed<K, V> {
    * A session-bound named Reader on this Feed: declares the Reader when
    * missing (at `start`, default BEGINNING — an existing declaration
    * keeps its own start and durable progress), opens a session with the
-   * bounded fetch capacity, and returns decoded messages.
+   * bounded page size, and returns decoded messages.
    */
   async reader(
     readerName: string,
-    capacity = 64,
+    maxPageSize = 64,
     start: ReaderStart = ReaderStart.beginning(),
   ): Promise<FeedReader<K, V>> {
     try {
@@ -378,7 +378,7 @@ export class Feed<K, V> {
         throw error;
       }
     }
-    const session = await this.client.reader(readerName).open(capacity);
+    const session = await this.client.reader(readerName).open(maxPageSize);
     return new FeedReader<K, V>(
       this.client.reader(readerName),
       session,
@@ -424,7 +424,7 @@ export class Feed<K, V> {
   subscribeDecoded(
     reader: string,
     start: ReaderStart | undefined,
-    capacity: number | undefined,
+    maxPageSize: number | undefined,
     onRecords: (messages: FeedMessage<K, V>[]) => void | Promise<void>,
     onError?: (error: WhitewaterError) => void,
   ): Subscription {
@@ -436,7 +436,7 @@ export class Feed<K, V> {
         await onRecords(decodeMessages(records, this.keyCodec, this.valueCodec));
       },
       onError,
-      capacity,
+      maxPageSize,
     );
   }
 

@@ -185,6 +185,37 @@ describe("typed Domain facade", () => {
   });
 });
 
+describe("Domain.createFeed", () => {
+  let riverbed: FakeRiverbed;
+  let client: WhitewaterClient;
+
+  beforeEach(async () => {
+    riverbed = await createFakeRiverbed();
+    client = new WhitewaterClient({
+      apiKey: "test-key",
+      endpoints: riverbed.endpoints,
+    });
+  });
+
+  afterEach(async () => {
+    await riverbed.close();
+  });
+
+  it("composes the Domain prefix and declares the feed", async () => {
+    await client.createDomain("shop");
+    const shop = await client.getDomain("shop");
+    await shop.createFeed("orders");
+    await shop.refresh();
+    expect(shop.feed("orders").name).toBe("shop.orders");
+    expect(await shop.feedNames()).toContain("shop.orders");
+  });
+
+  it("composes nested relative names inside the Domain", async () => {
+    const shop = client.domain("shop");
+    expect(shop.feed("x.y").name).toBe("shop.x.y");
+  });
+});
+
 describe("ReaderBuilder", () => {
   let riverbed: FakeRiverbed;
   let client: WhitewaterClient;

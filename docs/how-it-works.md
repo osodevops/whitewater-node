@@ -81,7 +81,8 @@ statement and calls `wcl` internally:
 
 ```ts
 await client.createDomain("shop");                  // CREATE DOMAIN shop;
-await client.createFeed("shop.orders");             // CREATE FEED shop.orders;
+const shop = await client.getDomain("shop");        // verifies + materializes
+await shop.createFeed("orders");                    // CREATE FEED shop.orders;
 await client.createWriter("orders.writer", "shop.orders");
 await client.openWriterSession("orders.writer");    // epoch in .data
 await client.createReader("audit", "shop.orders", ReaderStart.beginning());
@@ -89,6 +90,10 @@ await client.listFeeds();                           // SHOW FEEDS;
 await client.seekReader("audit", ReaderStart.now());// SEEK READER ... TO NOW;
 await client.dropFeed("shop.orders");               // DROP FEED shop.orders;
 ```
+
+`client.createFeed("shop.orders")` with the fully-qualified name is the
+flat-name equivalent; `domain.createFeed("orders")` composes the Domain
+prefix for you.
 
 `client.commands([...])` is the second door — the typed JSON command
 path for what WCL does not spell. Declaring a StateStore with named

@@ -239,6 +239,15 @@ export class Domain {
     return this.feed(relative);
   }
 
+  /**
+   * `CREATE FEED` inside this Domain — `shop.createFeed("orders")`
+   * declares `shop.orders`. {@link refresh} (or a lazy accessor's
+   * first load) surfaces it through {@link feeds}/{@link feedNames}.
+   */
+  createFeed(relative: string): Promise<ControlExecution> {
+    return this.client.createFeed(this.resolve(relative));
+  }
+
   private resolve(relative: string): string {
     if (relative == null) throw new Error("feed name is required");
     const full = relative.startsWith(this.name + ".") ? relative : `${this.name}.${relative}`;

@@ -32,7 +32,7 @@ const client = new WhitewaterClient({
 | `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`waitMs`/`newOnly`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
 | `client.subscribe(reader, feed, start, onRecords)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack in the background; `await sub.close()` to stop |
 | `client.stateStore(name)` / `client.stateStores` | Server-side StateStore facade — durable RF3 rows on the Nodes: `put`/`get`/`getBy` (named keys)/`iterate`/`delete`/`clear`/`drop`, plus `define` for declaration |
-| `client.domain(name)` / `client.getDomain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `getDomain()` verifies the Domain exists and materializes its catalog view in one batched read — `feeds("order")`, `feedNames()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `stateStores()`, `describe()`, `historyPolicy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix |
+| `client.domain(name)` / `client.getDomain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `getDomain()` verifies the Domain exists and materializes its catalog view in one batched read — `feeds("order")`, `feedNames()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `stateStores()`, `describe()`, `historyPolicy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix; `domain.createFeed("orders")` declares it |
 
 | `client.feed(name, codec?)` | Codec-bound typed Feed — `writer()`/`reader()` auto-declare and open sessions; `append`/`fetch`/`records`/`load`/`subscribe` serialize through the bound codecs |
 | `client.store(name, codec?)` | Codec-bound typed StateStore — every `put`/`get`/`getBy`/`iterate` serializes through the bound codecs |
@@ -92,6 +92,7 @@ import { ReaderStart, WhitewaterClient } from "whitewater-client";
 
 const shop = await client.getDomain("shop");   // verifies + materializes now
 // client.domain("shop") is the lazy form — zero I/O until needed
+await shop.createFeed("orders");           // CREATE FEED shop.orders;
 
 await shop.feedNames();                        // ['shop.orders', 'shop.returns']
 (await shop.feeds("order")).map((f) => f.name); // prefix-filtered Feed handles
@@ -282,7 +283,7 @@ escape hatches for the same wire contract.
 | Area | API |
 |---|---|
 | Client & transport | `new WhitewaterClient({ apiKey, endpoints, timeout? })` · `healthy()` · `useCompression` on feeds/writers |
-| Typed Domains | `domain(name)` lazy / `getDomain(name)` eager · `domainId` `revision` `describe()` `historyPolicy()` `refresh()` · `feeds(prefix)` `feedNames()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `stateStores()` · `feed(relative[, codec])` `getFeed` |
+| Typed Domains | `domain(name)` lazy / `getDomain(name)` eager · `domainId` `revision` `describe()` `historyPolicy()` `refresh()` · `feeds(prefix)` `feedNames()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `stateStores()` · `feed(relative[, codec])` `getFeed` · `createFeed(relative)` |
 | Schemas | `setDomainSchema` `setFeedSchema` `clearDomainSchema` `clearFeedSchema` · `Domain.schema()` `feedSchema()` `declaredFeedSchema()` · `SchemaDecl`/`FeedSchema` — `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`, `custom.<name>` |
 | Feeds | `feed(name[, keyCodec, valueCodec])` → `Feed<K,V>` · `useCompression` · `records()` `fetch()` `load()` · `writer` `append` `reader` `subscribe` `subscribeDecoded` `consumer` |
 | Writing | `FeedWriter.append(key, value)` `appendEvent` `appendAll` · `useCompression` `sessionEpoch` · idempotent `requestId` · `FeedEvent` carries event time + Metadata |

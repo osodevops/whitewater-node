@@ -78,7 +78,7 @@ codecs.custom(enc,dec) // protobuf, msgpack, application framing
 textMetadata({k:"v"})  // text Metadata map -> wire Buffers
 ```
 
-`client.feed(name)` binds the default `Feed<string, Buffer>`;
+`client.feed(name)` binds the default `Feed<string, string>` — UTF-8 both ways, so plain JSON flows with no codec ceremony; `codecs.bytes()`/`codecs.custom` opt into raw/other shapes;
 `feed.view(keyCodec, valueCodec)` and `store.view(...)` rebind codecs
 without a wire call. The byte-level `client.feeds`, `client.writer`,
 `client.reader`, and `client.stateStore` facades remain for raw access.

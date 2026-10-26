@@ -8,7 +8,7 @@ The contract in one line: **resolve = processed, reject = replay** —
 the SDK acks a page only after every record in it has been handled.
 
 ```ts
-import { codecs, ReaderStart, WhitewaterClient } from "whitewater-client";
+import { ReaderStart, WhitewaterClient } from "whitewater-client";
 
 const client = new WhitewaterClient({
   apiKey: process.env.WHITEWATER_API_KEY!,
@@ -23,12 +23,12 @@ await shop.createFeed("orders.dlq");          // dead-letter feed
 
 // ---- produce (usually a different service) ---------------------------
 // Bind codecs on the Feed handle — the SDK serializes, never Buffer.from.
-const orders = shop.feed("orders", codecs.utf8());   // JSON text payloads
+const orders = shop.feed("orders");   // string payloads — UTF-8 default
 const writer = await shop.createWriter(orders).writerId("orders.ingest").open();
 await writer.append("order-1", '{"total":42}');
 
 // ---- consume ----------------------------------------------------------
-const dlq = shop.feed("orders.dlq", codecs.utf8());
+const dlq = shop.feed("orders.dlq");
 const deadLetter = await shop.createWriter(dlq)
   .writerId("fulfillment.dlq").open();
 const reader = await shop.createReader(orders)

@@ -944,35 +944,35 @@ export class WhitewaterClient {
    * const page = await reader.fetch();            // FeedMessage<string, Order>[]
    * ```
    *
-   * `client.feed(name)` binds the default `Feed<string, Buffer>` —
-   * UTF-8 keys and untouched payload bytes, the escape hatch to the
-   * wire. `client.feed(name, valueCodec)` keeps UTF-8 keys (the common
+   * `client.feed(name)` binds the default `Feed<string, string>` —
+   * UTF-8 strings both ways, so un-schema-backed JSON flows with zero
+   * codec ceremony. `client.feed(name, valueCodec)` keeps UTF-8 keys (the common
    * case); the three-argument form binds both codecs explicitly —
    * protobuf/msgpack/custom via {@link codecs.custom}.
    */
-  feed(name: string): Feed<string, Buffer>;
+  feed(name: string): Feed<string, string>;
   feed<V>(name: string, valueCodec: Codec<V>): Feed<string, V>;
   feed<K, V>(name: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Feed<K, V>;
-  feed<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Feed<K, V> | Feed<string, V> | Feed<string, Buffer> {
+  feed<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Feed<K, V> | Feed<string, V> | Feed<string, string> {
     const keyCodec = b !== undefined ? (a as Codec<K>) : (codecs.utf8() as unknown as Codec<K>);
-    const valueCodec = (b ?? a ?? codecs.bytes()) as Codec<V>;
+    const valueCodec = (b ?? a ?? codecs.utf8()) as Codec<V>;
     return new Feed<K, V>(this, dotted(name), keyCodec, valueCodec);
   }
 
   /**
    * A codec-bound StateStore facade — every `get`/`put`/`iterate`
    * serializes through the bound codecs. `client.store(name)` binds
-   * `Store<string, Buffer>`; a second argument types the payload
+   * `Store<string, string>`; a second argument types the payload
    * (UTF-8 keys); three arguments bind both codecs. The byte-level
    * {@link stateStore} facade remains for raw access and declaration.
    */
-  store(name: string): Store<string, Buffer>;
+  store(name: string): Store<string, string>;
   store<V>(name: string, valueCodec: Codec<V>): Store<string, V>;
   store<K, V>(name: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Store<K, V>;
-  store<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Store<K, V> | Store<string, V> | Store<string, Buffer> {
+  store<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Store<K, V> | Store<string, V> | Store<string, string> {
     const bound = StateStore.bound(this.transport, name);
     const keyCodec = b !== undefined ? (a as Codec<K>) : (codecs.utf8() as unknown as Codec<K>);
-    const valueCodec = (b ?? a ?? codecs.bytes()) as Codec<V>;
+    const valueCodec = (b ?? a ?? codecs.utf8()) as Codec<V>;
     return Store.bind(bound, keyCodec, valueCodec);
   }
 

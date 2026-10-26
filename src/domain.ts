@@ -104,7 +104,7 @@ interface Snapshot {
  *   .readerId("fulfillment")                        // the Kafka groupId analogue
  *   .readerStartPoint(ReaderStart.BEGINNING)
  *   .maxPageSize(256)
- *   .open();                                        // FeedReader<string, Buffer>
+ *   .open();                                        // FeedReader<string, string>
  * ```
  *
  * The first catalog accessor issues ONE batched control read
@@ -166,7 +166,7 @@ export class Domain {
 
   /** Every Feed in this Domain as typed `Feed` handles, sorted by name.
    * `prefix` filters on the relative name (`shop.orders` → `orders`). */
-  async feeds(prefix?: string): Promise<Feed<string, Buffer>[]> {
+  async feeds(prefix?: string): Promise<Feed<string, string>[]> {
     return (await this.snap()).feeds
       .filter((full) => prefix === undefined || this.relative(full).startsWith(prefix))
       .map((full) => this.feed(this.relative(full)));
@@ -221,21 +221,21 @@ export class Domain {
    * (`"shop.orders"`) is accepted as-is. Pure name composition — no I/O.
    * Codecs bind exactly like {@link WhitewaterClient.feed}.
    */
-  feed(relative: string): Feed<string, Buffer>;
+  feed(relative: string): Feed<string, string>;
   feed<V>(relative: string, valueCodec: Codec<V>): Feed<string, V>;
   feed<K, V>(relative: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Feed<K, V>;
   feed<K, V>(
     relative: string,
     a?: Codec<K> | Codec<V>,
     b?: Codec<V>,
-  ): Feed<K, V> | Feed<string, V> | Feed<string, Buffer> {
+  ): Feed<K, V> | Feed<string, V> | Feed<string, string> {
     const keyCodec = b !== undefined ? (a as Codec<K>) : (codecs.utf8() as unknown as Codec<K>);
-    const valueCodec = (b ?? a ?? codecs.bytes()) as Codec<V>;
+    const valueCodec = (b ?? a ?? codecs.utf8()) as Codec<V>;
     return new Feed<K, V>(this.client, this.resolve(relative), keyCodec, valueCodec);
   }
 
   /** Alias of {@link feed}. */
-  getFeed(relative: string): Feed<string, Buffer> {
+  getFeed(relative: string): Feed<string, string> {
     return this.feed(relative);
   }
 

@@ -8,6 +8,8 @@ Requires Node 20+. No runtime dependencies — transport uses the global
 `fetch`; bytes are `Buffer`; nanosecond times are `bigint` serialized as
 decimal strings (never imprecise JS numbers).
 
+A complete microservice walkthrough — provision, produce, pump-process, dead-letter, shutdown — lives in [`docs/demo-service.md`](docs/demo-service.md).
+
 ## Clients
 
 ```ts

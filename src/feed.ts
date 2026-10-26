@@ -212,6 +212,51 @@ export class FeedReader<K, V> {
     return this.session;
   }
 
+  /**
+   * Deliver every record to `handler` — one at a time — acking each
+   * fetched page after its records are handled. The pump paces empty
+   * fetches on the server's `retry_after_ms` and exits when the reader
+   * is closed. `handler` returning `false` — or rejecting — leaves the
+   * in-flight page unacked so its tail replays: at-least-once delivery,
+   * never acknowledge undelivered records.
+   */
+  async forEach(
+    handler: (message: FeedMessage<K, V>) => boolean | void | Promise<boolean | void>,
+  ): Promise<void> {
+    while (this.session.sessionEpoch !== 0) {
+      const page = await this.fetch();
+      if (page.records.length === 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.max(1, page.retryAfterMs)),
+        );
+        continue;
+      }
+      for (const message of page.records) {
+        if ((await handler(message)) === false) return;
+      }
+      if (this.session.sessionEpoch === 0) return;
+      await this.ack();
+    }
+  }
+
+  /** `for await (const m of reader)` — iterates records one at a time,
+   * acking each page once consumed. `break` leaves the in-flight page
+   * unacked so its tail replays. */
+  async *[Symbol.asyncIterator](): AsyncGenerator<FeedMessage<K, V>> {
+    while (this.session.sessionEpoch !== 0) {
+      const page = await this.fetch();
+      if (page.records.length === 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.max(1, page.retryAfterMs)),
+        );
+        continue;
+      }
+      yield* page.records;
+      if (this.session.sessionEpoch === 0) return;
+      await this.ack();
+    }
+  }
+
   /** Release the session fence; durable acknowledged progress survives. */
   async close(): Promise<void> {
     if (this.session.sessionEpoch === 0) return;

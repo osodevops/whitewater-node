@@ -248,6 +248,32 @@ export class Domain {
     return this.client.createFeed(this.resolve(relative));
   }
 
+  /**
+   * Fluent Reader declaration on `feed` inside this Domain —
+   * `shop.createReader("orders")` binds `shop.orders`:
+   *
+   * ```ts
+   * const reader = await shop.createReader("orders")
+   *   .readerId("fulfillment")               // the Kafka groupId analogue
+   *   .readerStartPoint(ReaderStart.BEGINNING)
+   *   .open();
+   * ```
+   *
+   * Accepts a relative name or a `Feed` handle.
+   */
+  createReader<K, V>(feed: Feed<K, V> | string): ReaderBuilder<K, V> {
+    return this.client.createReader(this, feed) as ReaderBuilder<K, V>;
+  }
+
+  /**
+   * Fluent Writer declaration on `feed` inside this Domain —
+   * `shop.createWriter("orders")` binds `shop.orders`. Accepts a
+   * relative name or a `Feed` handle.
+   */
+  createWriter<K, V>(feed: Feed<K, V> | string): WriterBuilder<K, V> {
+    return this.client.createWriter(this, feed) as WriterBuilder<K, V>;
+  }
+
   private resolve(relative: string): string {
     if (relative == null) throw new Error("feed name is required");
     const full = relative.startsWith(this.name + ".") ? relative : `${this.name}.${relative}`;

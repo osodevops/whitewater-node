@@ -216,6 +216,83 @@ describe("Domain.createFeed", () => {
   });
 });
 
+describe("Domain-scoped builders + forEach", () => {
+  let riverbed: FakeRiverbed;
+  let client: WhitewaterClient;
+
+  beforeEach(async () => {
+    riverbed = await createFakeRiverbed();
+    client = new WhitewaterClient({
+      apiKey: "test-key",
+      endpoints: riverbed.endpoints,
+    });
+    await client.createDomain("shop");
+  });
+
+  afterEach(async () => {
+    await riverbed.close();
+  });
+
+  it("createWriter/createReader resolve relative names inside the Domain", async () => {
+    const shop = await client.getDomain("shop");
+    await shop.createFeed("orders");
+    const writer = await shop.createWriter("orders").writerId("ingest").open();
+    await writer.append("order-1", Buffer.from("1"));
+
+    const reader = await shop
+      .createReader("orders")
+      .readerId("fulfillment")
+      .readerStartPoint(ReaderStart.BEGINNING)
+      .open();
+    const page = await reader.fetch();
+    expect(page.records[0].key).toBe("order-1");
+    await reader.close();
+  });
+
+  it("reader.forEach acks handled pages and replays the unacked tail", async () => {
+    const shop = client.domain("shop");
+    await shop.createFeed("orders");
+    const writer = await shop.createWriter("orders").writerId("w").open();
+    await writer.append("a", Buffer.from("1"));
+    await writer.append("b", Buffer.from("2"));
+
+    const reader = await shop
+      .createReader("orders")
+      .readerId("pump")
+      .readerStartPoint(ReaderStart.BEGINNING)
+      .capacity(1)
+      .open();
+    const seen: string[] = [];
+    await reader.forEach((m) => {
+      seen.push(m.key);
+      return seen.length < 2;
+    });
+    expect(seen).toEqual(["a", "b"]);
+    await reader.close();
+
+    const again = await shop.createReader("orders").readerId("pump").open();
+    expect((await again.fetch()).records[0].key).toBe("b");
+    await again.close();
+  });
+
+  it("for await iterates records per page", async () => {
+    const shop = client.domain("shop");
+    await shop.createFeed("orders");
+    const writer = await shop.createWriter("orders").writerId("w").open();
+    await writer.append("a", Buffer.from("1"));
+    const reader = await shop
+      .createReader("orders")
+      .readerId("iter")
+      .readerStartPoint(ReaderStart.BEGINNING)
+      .open();
+    for await (const m of reader) {
+      expect(m.key).toBe("a");
+      break;
+    }
+    await reader.close();
+  });
+});
+
 describe("ReaderBuilder", () => {
   let riverbed: FakeRiverbed;
   let client: WhitewaterClient;

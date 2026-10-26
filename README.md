@@ -100,20 +100,23 @@ await shop.readers(); await shop.writers();     // scoped catalog views
 
 const orders = shop.feed("orders", codecs.json<Order>());
 
-const writer = await client
-  .createWriter(shop, orders)
+// Everything a service needs hangs off the Domain — relative names
+// resolve inside it:
+const writer = await shop
+  .createWriter("orders")
   .writerId("orders.ingest")
   .open();
 await writer.append("order-1", { id: "order-1", total: 42 });
 
-const reader = await client
-  .createReader(shop, orders)
+const reader = await shop
+  .createReader("orders")
   .readerId("fulfillment")                        // durable id — the Kafka groupId analogue
   .readerStartPoint(ReaderStart.BEGINNING)        // first-declare only
   .capacity(256)
   .open();
-const page = await reader.fetch();                // FeedMessage<string, Order>[]
-await reader.ack();
+await reader.forEach(async (m) => handle(m.value)); // per-record pump: deliver → ack each page
+// or iterate: `for await (const m of reader)` — same ack-per-page semantics
+// or stay manual: fetch() → handle records → ack()
 await reader.close();
 ```
 
@@ -283,7 +286,7 @@ escape hatches for the same wire contract.
 | Area | API |
 |---|---|
 | Client & transport | `new WhitewaterClient({ apiKey, endpoints, timeout? })` · `healthy()` · `useCompression` on feeds/writers |
-| Typed Domains | `domain(name)` lazy / `getDomain(name)` eager · `domainId` `revision` `describe()` `historyPolicy()` `refresh()` · `feeds(prefix)` `feedNames()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `stateStores()` · `feed(relative[, codec])` `getFeed` · `createFeed(relative)` |
+| Typed Domains | `domain(name)` lazy / `getDomain(name)` eager · `domainId` `revision` `describe()` `historyPolicy()` `refresh()` · `feeds(prefix)` `feedNames()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `stateStores()` · `feed(relative[, codec])` `getFeed` · `createFeed` `createReader` `createWriter` (relative/Feed) |
 | Schemas | `setDomainSchema` `setFeedSchema` `clearDomainSchema` `clearFeedSchema` · `Domain.schema()` `feedSchema()` `declaredFeedSchema()` · `SchemaDecl`/`FeedSchema` — `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`, `custom.<name>` |
 | Feeds | `feed(name[, keyCodec, valueCodec])` → `Feed<K,V>` · `useCompression` · `records()` `fetch()` `load()` · `writer` `append` `reader` `subscribe` `subscribeDecoded` `consumer` |
 | Writing | `FeedWriter.append(key, value)` `appendEvent` `appendAll` · `useCompression` `sessionEpoch` · idempotent `requestId` · `FeedEvent` carries event time + Metadata |

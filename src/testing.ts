@@ -113,6 +113,7 @@ interface StoredRecord {
 
 class FakeFeed {
   readonly id = randomUUID();
+  readonly createdAtNs = nowNs();
   readonly log: StoredRecord[] = [];
   private readonly waiters = new Set<() => void>();
 
@@ -167,6 +168,7 @@ class FakeFeed {
 
 class FakeWriter {
   readonly id = randomUUID();
+  readonly createdAtNs = nowNs();
   /** Current fencing epoch; 0 until the first session opens. */
   epoch = 0;
   sequence = 0;
@@ -181,9 +183,12 @@ class FakeWriter {
 
 class FakeReader {
   readonly id = randomUUID();
+  readonly createdAtNs = nowNs();
   sessionEpoch = 0;
   capacity = 64;
   open = false;
+  /** The declared START AT kind — beginning | now | cursor | timestamp. */
+  startKind = "beginning";
   /** Durable restart point — survives close/reopen. */
   acknowledged = 0;
   /** Session delivery frontier — resets to `acknowledged` on open. */
@@ -207,6 +212,7 @@ interface StoredRow {
 
 class FakeStore {
   readonly id = randomUUID();
+  readonly createdAtNs = nowNs();
   sequence = 0;
   readonly declaredKeys = new Set<string>();
   /** key_base64 → row. */
@@ -234,11 +240,15 @@ export class FakeRiverbed {
   private readonly feeds = new Map<string, FakeFeed>();
   private readonly writers = new Map<string, FakeWriter>();
   private readonly readers = new Map<string, FakeReader>();
-  private readonly subscriptions = new Map<string, { id: string; feed: string }>();
+  private readonly subscriptions = new Map<
+    string,
+    { id: string; feed: string; startKind: string; createdAtNs: bigint }
+  >();
   private readonly stores = new Map<string, FakeStore>();
   private readonly pipes = new Map<string, Json>();
-  private readonly domains = new Set<string>();
+  private readonly domains = new Map<string, { id: string; createdAtNs: bigint }>();
   private readonly roles = new Set<string>();
+  private readonly roleIds = new Map<string, string>();
   /** `${feed}:${writer_session_id}` → last committed sequence (raw path). */
   private readonly feedSequences = new Map<string, number>();
   /** `${feed}:${writer_session_id}:${request_id}` → committed record. */
@@ -369,11 +379,29 @@ export class FakeRiverbed {
 
   // ---- Catalog ---------------------------------------------------------------
 
+  private domain(name: string): { id: string; createdAtNs: bigint } {
+    let domain = this.domains.get(name);
+    if (!domain) {
+      domain = { id: randomUUID(), createdAtNs: nowNs() };
+      this.domains.set(name, domain);
+    }
+    return domain;
+  }
+
+  /** The `space_id` a resource name falls under — the fake scopes by
+   * first dotted segment, matching its domain derivation. */
+  private spaceIdOf(resourceName: string): string | null {
+    return this.domains.get(resourceName.split(".")[0])?.id ?? null;
+  }
+
   private feed(name: string): FakeFeed {
     let feed = this.feeds.get(name);
     if (!feed) {
       feed = new FakeFeed(name);
       this.feeds.set(name, feed);
+      // Declarations materialize their owning Domain on first
+      // reference — the typed facade never declares it itself.
+      this.domain(name.split(".")[0]);
     }
     return feed;
   }
@@ -489,6 +517,7 @@ export class FakeRiverbed {
       if (this.readers.has(name)) refuse(400, `reader '${name}' already exists`);
       const feed = this.feed(feedName);
       const reader = new FakeReader(name, feed.name);
+      reader.startKind = this.startKind(start);
       reader.acknowledged = reader.delivered = this.startPosition(feed, start);
       this.readers.set(name, reader);
       return ok({ reader_id: reader.id, feed_id: feed.id });
@@ -511,17 +540,26 @@ export class FakeRiverbed {
       if (this.subscriptions.has(m[1])) {
         refuse(400, `subscription '${m[1]}' already exists`);
       }
-      this.subscriptions.set(m[1], { id: randomUUID(), feed: this.feed(m[2]).name });
+      this.subscriptions.set(m[1], {
+        id: randomUUID(),
+        feed: this.feed(m[2]).name,
+        startKind: this.startKind(m[3]),
+        createdAtNs: nowNs(),
+      });
       return ok();
     }
     if ((m = /^CREATE\s+DOMAIN\s+(\S+)$/i.exec(text))) {
       if (this.domains.has(m[1])) refuse(400, `domain '${m[1]}' already exists`);
-      this.domains.add(m[1]);
-      return ok();
+      this.domain(m[1]);
+      return ok(this.resourceRow("domains", this.domains.get(m[1])!, m[1]));
+    }
+    if ((m = /^DESCRIBE\s+(\S+)\s+(\S+)$/i.exec(text))) {
+      return ok(this.describe(m[1].toUpperCase(), m[2]));
     }
     if ((m = /^CREATE\s+ROLE\s+(\S+)$/i.exec(text))) {
       if (this.roles.has(m[1])) refuse(400, `role '${m[1]}' already exists`);
       this.roles.add(m[1]);
+      this.roleIds.set(m[1], randomUUID());
       return ok();
     }
     if ((m = /^DROP\s+(FEED|WRITER|READER|SUBSCRIPTION|DOMAIN|ROLE)\s+(\S+)$/i.exec(text))) {
@@ -537,9 +575,167 @@ export class FakeRiverbed {
       return ok();
     }
     if ((m = /^SHOW\s+(\S+)$/i.exec(text))) {
-      return ok({ rows: this.show(m[1].toUpperCase()) });
+      return ok(this.show(m[1].toUpperCase()) as unknown as Json);
     }
-    return ok(); // DESCRIBE/GRANT/… — canned success
+    return ok(); // GRANT/… — canned success
+  }
+
+  /** `START AT` operand → its declared kind. */
+  private startKind(start: string | undefined): string {
+    const s = (start ?? "").trim().toUpperCase();
+    if (s.startsWith("NOW")) return "now";
+    if (s.startsWith("CURSOR")) return "cursor";
+    if (s.startsWith("TIMESTAMP")) return "timestamp";
+    return "beginning";
+  }
+
+  /** The catalog row SHOW/DESCRIBE surfaces for one resource — field
+   * names match the server's `space_id`/`feed_id` join keys. */
+  private resourceRow(kind: string, item: unknown, name?: string): Json {
+    switch (kind) {
+      case "domains": {
+        const d = item as { id: string; createdAtNs: bigint };
+        return {
+          name: name ?? "",
+          space_id: d.id,
+          domain_id: d.id,
+          status: "active",
+          created_at_ns: d.createdAtNs.toString(10),
+        };
+      }
+      case "feeds": {
+        const f = item as FakeFeed;
+        return {
+          name: f.name,
+          feed_id: f.id,
+          space_id: this.spaceIdOf(f.name),
+          status: "active",
+          created_at_ns: f.createdAtNs.toString(10),
+        };
+      }
+      case "writers": {
+        const w = item as FakeWriter;
+        return {
+          name: w.name,
+          writer_id: w.id,
+          feed: w.feed,
+          feed_id: this.feeds.get(w.feed)?.id ?? null,
+          status: "active",
+          created_at_ns: w.createdAtNs.toString(10),
+          session_epoch: w.epoch,
+          session_active: w.epoch > 0,
+        };
+      }
+      case "readers": {
+        const r = item as FakeReader;
+        return {
+          name: r.name,
+          reader_id: r.id,
+          feed: r.feed,
+          feed_id: this.feeds.get(r.feed)?.id ?? null,
+          start: { kind: r.startKind },
+          status: "active",
+          created_at_ns: r.createdAtNs.toString(10),
+          session_epoch: r.sessionEpoch,
+          session_active: r.open,
+          session_capacity: r.capacity,
+          acknowledged_cursor: this.feeds.get(r.feed)?.cursorAt(r.acknowledged) ?? null,
+        };
+      }
+      case "subscriptions": {
+        const s = item as { id: string; feed: string; startKind: string; createdAtNs: bigint };
+        return {
+          name: name ?? "",
+          subscription_id: s.id,
+          space_id: this.spaceIdOf(s.feed),
+          feed: s.feed,
+          start: { kind: s.startKind },
+          stage: "declared",
+          status: "active",
+          created_at_ns: s.createdAtNs.toString(10),
+        };
+      }
+      case "stores": {
+        const s = item as FakeStore;
+        return {
+          name: s.name,
+          store_id: s.id,
+          space_id: this.spaceIdOf(s.name),
+          status: "active",
+          created_at_ns: s.createdAtNs.toString(10),
+        };
+      }
+      case "pipes": {
+        const pipe = item as Json;
+        const sub = [...this.subscriptions.values()].find(
+          (s) => s.id === pipe.subscription_id,
+        );
+        return {
+          ...pipe,
+          pipe_id: pipe.pipe_id ?? null,
+          space_id: sub != null ? this.spaceIdOf(sub.feed) : null,
+        };
+      }
+      case "roles": {
+        const roleName = String(item);
+        return {
+          name: roleName,
+          role_id: this.roleIds.get(roleName) ?? "",
+          status: "active",
+        };
+      }
+      default:
+        return { name: name ?? String(item) };
+    }
+  }
+
+  /** `DESCRIBE <kind> <name>` — the row, or a refusal when missing. */
+  private describe(kind: string, name: string): Json {
+    switch (kind) {
+      case "DOMAIN":
+      case "SPACE": {
+        const d = this.domains.get(name);
+        if (!d) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("domains", d, name);
+      }
+      case "FEED": {
+        const f = this.feeds.get(name);
+        if (!f) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("feeds", f);
+      }
+      case "WRITER": {
+        const w = this.writers.get(name);
+        if (!w) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("writers", w);
+      }
+      case "READER": {
+        const r = this.readers.get(name);
+        if (!r) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("readers", r);
+      }
+      case "SUBSCRIPTION": {
+        const s = this.subscriptions.get(name);
+        if (!s) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("subscriptions", s, name);
+      }
+      case "STATESTORE":
+      case "STATE_STORE": {
+        const s = this.stores.get(name);
+        if (!s) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("stores", s);
+      }
+      case "PIPE": {
+        const p = this.pipes.get(name);
+        if (!p) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("pipes", p);
+      }
+      case "ROLE": {
+        if (!this.roles.has(name)) refuse(400, `resource not found: ${name}`);
+        return this.resourceRow("roles", name);
+      }
+      default:
+        refuse(400, `unsupported DESCRIBE resource ${kind}`);
+    }
   }
 
   private drop(kind: string, name: string): void {
@@ -563,6 +759,7 @@ export class FakeRiverbed {
         break;
       case "ROLE":
         this.roles.delete(name);
+        this.roleIds.delete(name);
         break;
     }
   }
@@ -605,11 +802,22 @@ export class FakeRiverbed {
         break;
       }
       case "DOMAIN": {
-        if (this.domains.delete(current)) this.domains.add(renamed);
+        const domain = this.domains.get(current);
+        if (domain) {
+          this.domains.delete(current);
+          this.domains.set(renamed, domain);
+        }
         break;
       }
       case "ROLE": {
-        if (this.roles.delete(current)) this.roles.add(renamed);
+        if (this.roles.delete(current)) {
+          this.roles.add(renamed);
+          const id = this.roleIds.get(current);
+          if (id) {
+            this.roleIds.delete(current);
+            this.roleIds.set(renamed, id);
+          }
+        }
         break;
       }
     }
@@ -618,21 +826,29 @@ export class FakeRiverbed {
   private show(kind: string): Json[] {
     switch (kind) {
       case "FEEDS":
-        return [...this.feeds.keys()].map((name) => ({ name }));
+        return [...this.feeds.values()].map((f) => this.resourceRow("feeds", f));
       case "WRITERS":
-        return [...this.writers.keys()].map((name) => ({ name }));
+        return [...this.writers.values()].map((w) => this.resourceRow("writers", w));
       case "READERS":
-        return [...this.readers.keys()].map((name) => ({ name }));
+        return [...this.readers.values()].map((r) => this.resourceRow("readers", r));
       case "SUBSCRIPTIONS":
-        return [...this.subscriptions.keys()].map((name) => ({ name }));
+        return [...this.subscriptions.entries()].map(([name, s]) =>
+          this.resourceRow("subscriptions", s, name),
+        );
       case "DOMAINS":
-        return [...this.domains].map((name) => ({ name }));
+      case "SPACES":
+        return [...this.domains.entries()].map(([name, d]) =>
+          this.resourceRow("domains", d, name),
+        );
+      case "STATESTORES":
+      case "STATE_STORES":
+        return [...this.stores.values()].map((s) => this.resourceRow("stores", s));
       case "ROLES":
-        return [...this.roles].map((name) => ({ name }));
+        return [...this.roles].map((name) => this.resourceRow("roles", name));
       case "GRANTS":
         return [];
       case "PIPES":
-        return [...this.pipes.values()];
+        return [...this.pipes.values()].map((p) => this.resourceRow("pipes", p));
       default:
         return [];
     }
@@ -675,6 +891,7 @@ export class FakeRiverbed {
         const subscription = this.subscriptions.get(str(command.subscription));
         const pipe: Json = {
           name,
+          pipe_id: randomUUID(),
           stage: "declared",
           subscription_id: subscription?.id ?? randomUUID(),
           operation: asObj(command.operation),
@@ -699,15 +916,10 @@ export class FakeRiverbed {
         return ok();
       }
       case "describe": {
-        if (str(command.kind) === "pipe") {
-          const pipe = this.pipes.get(str(command.name));
-          return ok(pipe ?? {});
-        }
-        return ok();
+        return ok(this.describe(str(command.kind).toUpperCase(), str(command.name)));
       }
       case "show": {
-        if (str(command.kind) === "pipes") return ok({ rows: [...this.pipes.values()] });
-        return ok({ rows: this.show(str(command.kind).toUpperCase()) });
+        return ok(this.show(str(command.kind).toUpperCase()) as unknown as Json);
       }
       case "drop": {
         const kind = str(command.kind);

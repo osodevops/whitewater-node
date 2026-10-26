@@ -316,13 +316,18 @@ export class Feed<K, V> {
   }
 
   /**
-   * A session-bound named Reader on this Feed: declares the Reader (at
-   * BEGINNING) when missing, opens a session with the bounded fetch
-   * capacity, and returns decoded messages.
+   * A session-bound named Reader on this Feed: declares the Reader when
+   * missing (at `start`, default BEGINNING — an existing declaration
+   * keeps its own start and durable progress), opens a session with the
+   * bounded fetch capacity, and returns decoded messages.
    */
-  async reader(readerName: string, capacity = 64): Promise<FeedReader<K, V>> {
+  async reader(
+    readerName: string,
+    capacity = 64,
+    start: ReaderStart = ReaderStart.beginning(),
+  ): Promise<FeedReader<K, V>> {
     try {
-      await this.client.createReader(readerName, this.name);
+      await this.client.createReader(readerName, this.name, start);
     } catch (error) {
       if (!(error instanceof WhitewaterError && error.message.includes("exists"))) {
         throw error;

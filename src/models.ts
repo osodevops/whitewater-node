@@ -236,6 +236,10 @@ export type ReaderStart =
   | { kind: "timestamp"; nanos: bigint };
 
 export const ReaderStart = {
+  /** Fluent start constant — `readerStartPoint(ReaderStart.BEGINNING)`. */
+  BEGINNING: { kind: "beginning" } as ReaderStart,
+  /** Fluent start constant — only-new records; alias of `now()`. */
+  END: { kind: "now" } as ReaderStart,
   /** From the oldest retained record. */
   beginning(): ReaderStart {
     return { kind: "beginning" };
@@ -251,6 +255,10 @@ export const ReaderStart = {
   /** From a signed Unix epoch nanosecond timestamp. */
   timestampNs(nanos: bigint): ReaderStart {
     return { kind: "timestamp", nanos };
+  },
+  /** From a `Date` — millisecond precision widened to epoch nanos. */
+  timestamp(when: Date): ReaderStart {
+    return { kind: "timestamp", nanos: BigInt(when.getTime()) * 1_000_000n };
   },
   /** The WCL `START AT` operand, e.g. `BEGINNING`. */
   wcl(start: ReaderStart): string {

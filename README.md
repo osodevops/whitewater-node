@@ -32,6 +32,8 @@ const client = new WhitewaterClient({
 | `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`waitMs`/`newOnly`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
 | `client.subscribe(reader, feed, start, onRecords)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack in the background; `await sub.close()` to stop |
 | `client.stateStore(name)` / `client.stateStores` | Server-side StateStore facade — durable RF3 rows on the Nodes: `put`/`get`/`getBy` (named keys)/`iterate`/`delete`/`clear`/`drop`, plus `define` for declaration |
+| `client.domain(name)` / `client.getDomain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `getDomain()` verifies the Domain exists and materializes its catalog view in one batched read — `feeds("order")`, `feedNames()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `stateStores()`, `describe()`, `historyPolicy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix |
+
 | `client.feed(name, codec?)` | Codec-bound typed Feed — `writer()`/`reader()` auto-declare and open sessions; `append`/`fetch`/`records`/`load`/`subscribe` serialize through the bound codecs |
 | `client.store(name, codec?)` | Codec-bound typed StateStore — every `put`/`get`/`getBy`/`iterate` serializes through the bound codecs |
 
@@ -78,6 +80,49 @@ textMetadata({k:"v"})  // text Metadata map -> wire Buffers
 `feed.view(keyCodec, valueCodec)` and `store.view(...)` rebind codecs
 without a wire call. The byte-level `client.feeds`, `client.writer`,
 `client.reader`, and `client.stateStore` facades remain for raw access.
+
+### Typed Domains — navigate, don't concatenate
+
+A Domain owns every Feed it prefixes (`shop` owns `shop.orders`), so the
+friendliest surface navigates domain → feed → reader/writer instead
+of composing dotted names by hand:
+
+```ts
+import { ReaderStart, WhitewaterClient } from "whitewater-client";
+
+const shop = await client.getDomain("shop");   // verifies + materializes now
+// client.domain("shop") is the lazy form — zero I/O until needed
+
+await shop.feedNames();                        // ['shop.orders', 'shop.returns']
+(await shop.feeds("order")).map((f) => f.name); // prefix-filtered Feed handles
+await shop.readers(); await shop.writers();     // scoped catalog views
+
+const orders = shop.feed("orders", codecs.json<Order>());
+
+const writer = await client
+  .createWriter(shop, orders)
+  .writerId("orders.ingest")
+  .open();
+await writer.append("order-1", { id: "order-1", total: 42 });
+
+const reader = await client
+  .createReader(shop, orders)
+  .readerId("fulfillment")                        // durable id — the Kafka groupId analogue
+  .readerStartPoint(ReaderStart.BEGINNING)        // first-declare only
+  .capacity(256)
+  .open();
+const page = await reader.fetch();                // FeedMessage<string, Order>[]
+await reader.ack();
+await reader.close();
+```
+
+`readerId` is durable application state: `readerStartPoint` applies
+only when the Reader is first declared — an existing Reader resumes its
+acknowledged frontier (the `auto.offset.reset` mapping). A `Feed` bound
+to another Domain is refused locally, before any network call. The
+first catalog accessor issues ONE batched control read (`describe
+domain` + every `show` listing) and caches the snapshot — `refresh()`
+re-pulls.
 
 ### Permanent consumers — the Kafka loop without the plumbing
 

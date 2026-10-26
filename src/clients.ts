@@ -7,6 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 import { codecs, type Codec } from "./codecs.js";
+import { asFeed, Domain, ReaderBuilder, WriterBuilder } from "./domain.js";
 import { AmbiguousResult, Conflict, Unavailable, WhitewaterError } from "./errors.js";
 import { Feed } from "./feed.js";
 import {
@@ -700,20 +701,70 @@ export class WhitewaterClient {
     return this.wcl(`CREATE FEED ${dotted(name)}`);
   }
 
-  /** `CREATE WRITER <name> TO <feed>` */
-  createWriter(name: string, feed: string): Promise<ControlExecution> {
-    return this.wcl(`CREATE WRITER ${resource(name)} TO ${dotted(feed)}`);
+  /**
+   * `CREATE WRITER <name> TO <feed>` — or, when the first argument is
+   * a {@link Domain}, a fluent {@link WriterBuilder}:
+   * `client.createWriter(domain, feed).writerId("orders.ingest").open()`.
+   */
+  createWriter(name: string, feed: string): Promise<ControlExecution>;
+  createWriter<K, V>(domain: Domain, feed: Feed<K, V> | string): WriterBuilder<K, V>;
+  createWriter<K, V>(
+    nameOrDomain: string | Domain,
+    feed: Feed<K, V> | string,
+  ): Promise<ControlExecution> | WriterBuilder<K, V> {
+    if (nameOrDomain instanceof Domain) {
+      return new WriterBuilder<K, V>(this, nameOrDomain, asFeed(nameOrDomain, feed));
+    }
+    return this.wcl(`CREATE WRITER ${resource(nameOrDomain)} TO ${dotted(feed as string)}`);
   }
 
-  /** `CREATE READER <name> FROM <feed> [START AT <start>]` (default BEGINNING). */
+  /**
+   * `CREATE READER <name> FROM <feed> [START AT <start>]` (default
+   * BEGINNING) — or, when the first argument is a {@link Domain}, a
+   * fluent {@link ReaderBuilder}:
+   * `client.createReader(domain, feed).readerId("audit")
+   * .readerStartPoint(ReaderStart.BEGINNING).open()`.
+   */
   createReader(
     name: string,
     feed: string,
+    start?: ReaderStart,
+  ): Promise<ControlExecution>;
+  createReader<K, V>(domain: Domain, feed: Feed<K, V> | string): ReaderBuilder<K, V>;
+  createReader<K, V>(
+    nameOrDomain: string | Domain,
+    feed: Feed<K, V> | string,
     start: ReaderStart = readerStart.beginning(),
-  ): Promise<ControlExecution> {
+  ): Promise<ControlExecution> | ReaderBuilder<K, V> {
+    if (nameOrDomain instanceof Domain) {
+      const builder = new ReaderBuilder<K, V>(this, nameOrDomain, asFeed(nameOrDomain, feed));
+      return builder;
+    }
     return this.wcl(
-      `CREATE READER ${resource(name)} FROM ${dotted(feed)} START AT ${readerStart.wcl(start)}`,
+      `CREATE READER ${resource(nameOrDomain)} FROM ${dotted(feed as string)} START AT ${readerStart.wcl(start)}`,
     );
+  }
+
+  // ---- strongly-typed Domains ---------------------------------------------
+  // A Domain owns every Feed it prefixes (shop owns shop.orders). The
+  // typed entry point:
+  //
+  //   const shop = await client.getDomain("shop");
+  //   const reader = await client.createReader(shop, shop.feed("orders"))
+  //     .readerId("fulfillment")
+  //     .readerStartPoint(ReaderStart.BEGINNING)
+  //     .open();
+
+  /** A lazy {@link Domain} handle — no I/O until a catalog accessor
+   * runs; {@link Domain.feed} name composition stays free. */
+  domain(name: string): Domain {
+    return new Domain(this, name);
+  }
+
+  /** {@link domain} plus an immediate snapshot load — verifies the
+   * Domain exists now. */
+  getDomain(name: string): Promise<Domain> {
+    return this.domain(name).refresh();
   }
 
   /** `CREATE SUBSCRIPTION <name> FROM <feed> [START AT <start>]`. */

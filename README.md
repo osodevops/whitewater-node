@@ -27,17 +27,15 @@ const client = new WhitewaterClient({
 
 | Client | Covers |
 |---|---|
-| `client` (direct) | WCL + typed command execution (`/v1/admin/wcl`, `/v1/admin/commands`), node health — plus typed resource methods (`createDomain`, `createFeed`, `createWriter`, `createReader`, `createSubscription`, `describeFeed`, `renameFeed`, `dropFeed`, `listFeeds`, `seekReader`, `openWriterSession`, …) that build the same WCL for you. `ReaderStart` (`beginning()`, `now()`, `cursor(c)`, `timestampNs(ns)`) supplies `START AT` positions |
-| `client.writer(name, epoch)` | Idempotent single and batch appends (`requestId` dedup) |
-| `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
-| `client.subscriptionMember(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
-| `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`waitMs`/`newOnly`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
-| `client.subscribe(reader, feed, start, onRecords)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack in the background; `await sub.close()` to stop |
-| `client.stateStore(name)` / `client.stateStores` | Server-side StateStore facade — durable RF3 rows on the Nodes: `put`/`get`/`getBy` (named keys)/`iterate`/`delete`/`clear`/`drop`, plus `define` for declaration |
-| `client.domain(name)` / `client.getDomain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `getDomain()` verifies the Domain exists and materializes its catalog view in one batched read — `feeds("order")`, `feedNames()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `stateStores()`, `describe()`, `historyPolicy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix; `domain.createFeed("orders")` declares it |
-
-| `client.feed(name, codec?)` | Codec-bound typed Feed — `writer()`/`reader()` auto-declare and open sessions; `append`/`fetch`/`records`/`load`/`subscribe` serialize through the bound codecs |
-| `client.store(name, codec?)` | Codec-bound typed StateStore — every `put`/`get`/`getBy`/`iterate` serializes through the bound codecs |
+| `client` (direct) | WCL + typed command execution (`/v1/admin/wcl`, `/v1/admin/commands`), node health, demand observability, and Domain/Role lifecycle (`createDomain`, `domain`, `getDomain`, `describeDomain`, `renameDomain`, `dropDomain`, `listDomains`, `createRole`, …). `ReaderStart` (`beginning()`, `now()`, `cursor(c)`, `timestampNs(ns)`) supplies `START AT` positions |
+| `client.createDomain(name)` → `Domain` / `client.domain(name)` / `client.getDomain(name)` | **The only front door for resources** — `createDomain()` returns the Domain handle; `domain()` is lazy (free name composition, no I/O); `getDomain()` verifies and materializes the catalog in one batched read — `feeds("order")`, `feedNames()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `stateStores()`, `describe()`, `historyPolicy`, `refresh()` |
+| `domain.createFeed` / `feed` / `createReader` / `createWriter` | Feeds and typed `Feed<K,V>` binding (`feed("orders", codec?)`) — `writer()`/`reader()` auto-declare and open sessions; fluent `createReader`/`createWriter` builders take relative feed names |
+| `domain.writer` / `reader` / `memberClient` / `subscription` | Named-Writer/Reader sessions and raw subscription-member leases, scoped inside the Domain |
+| `domain.createSubscription` / `subscribe` | Durable Subscriptions and the managed consume loop — the source Feed may cross Domains via a `Feed` handle or `scoped.abs(...)` |
+| `domain.stateStore` / `store` / `defineStateStore` / `dropStateStore` | Server-side StateStore facade — durable RF3 rows on the Nodes: `put`/`get`/`getBy`/`iterate`/`delete`/`clear`/`drop`, codec-bound `Store<K,V>` |
+| `domain.pipe` / `pipeInfos` / `defineForwardPipe` / `defineEnrichPipe` / `defineWindowPipe` | Managed Pipes — every endpoint a `ScopedRef` (`scoped.rel`/`scoped.abs`/handles); Pipe + input Subscription stay in-domain |
+| `domain.queryIndex` | Replicated Index queries — exact/prefix/range predicates |
+| `domain.describeFeed`/`describeWriter`/`describeReader`/`describeSubscription`, `rename*`, `drop*`, `setFeedSchema`/`clearFeedSchema`, `openWriterSession`, `seekReader` | Resource lifecycle — every name resolves inside the Domain |
 
 ## Typed feeds and stores — codecs do the serialization
 
@@ -51,7 +49,8 @@ interface Order { id: string; total: number }
 
 // String keys + JSON payloads (one arg types the payload; two args
 // bind key and payload codecs explicitly).
-const orders = client.feed("orders.events", codecs.json<Order>());
+const ordersDomain = await client.createDomain("orders");
+const orders = ordersDomain.feed("events", codecs.json<Order>());
 
 const writer = await orders.writer("ingest");   // declares + opens session
 await writer.append("order-1", { id: "order-1", total: 42 });
@@ -63,7 +62,8 @@ for (const m of page.records) console.log(m.key, m.value.total);
 await reader.ack();
 await reader.close();
 
-const profiles = client.store("accounts.employees", codecs.json<Profile>());
+const accounts = client.domain("accounts");
+const profiles = accounts.store("employees", codecs.json<Profile>());
 await profiles.put("user-1", profile, { passport: "P111" });
 const row = await profiles.get("user-1");        // row.value is Profile
 for await (const r of profiles.iterate()) export(r);
@@ -78,10 +78,11 @@ codecs.custom(enc,dec) // protobuf, msgpack, application framing
 textMetadata({k:"v"})  // text Metadata map -> wire Buffers
 ```
 
-`client.feed(name)` binds the default `Feed<string, string>` — UTF-8 both ways, so plain JSON flows with no codec ceremony; `codecs.bytes()`/`codecs.custom` opt into raw/other shapes;
+`domain.feed(relative)` binds the default `Feed<string, string>` — UTF-8 both ways, so plain JSON flows with no codec ceremony; `codecs.bytes()`/`codecs.custom` opt into raw/other shapes;
 `feed.view(keyCodec, valueCodec)` and `store.view(...)` rebind codecs
-without a wire call. The byte-level `client.feeds`, `client.writer`,
-`client.reader`, and `client.stateStore` facades remain for raw access.
+without a wire call. The byte-level `domain.feedOps()`,
+`domain.writer`, `domain.reader`, and `domain.stateStore` facades
+remain for raw access.
 
 ### Typed Domains — navigate, don't concatenate
 
@@ -106,7 +107,7 @@ const orders = shop.feed("orders", codecs.json<Order>());
 // resolve inside it:
 const writer = await shop
   .createWriter("orders")
-  .writerId("orders.ingest")
+  .writerId("ingest")      // resolves to shop.ingest
   .open();
 await writer.append("order-1", { id: "order-1", total: 42 });
 
@@ -141,13 +142,13 @@ a Feed's own declaration overrides the named sides:
 await client.setDomainSchema("shop", {
   value: { format: "json", subject: "order-v1" },
 });
-await client.setFeedSchema("shop.orders", { key: { format: "text" } });
+await shop.setFeedSchema("orders", { key: { format: "text" } });
 await shop.refresh();                    // the snapshot cached the catalog
 
 await shop.schema();                     // the Domain default
-await shop.feedSchema("shop.orders");    // effective: key=text, value=json/order-v1
-await shop.declaredFeedSchema("shop.orders");
-await client.clearFeedSchema("shop.orders");  // reverts to inheritance
+await shop.feedSchema("orders");         // effective: key=text, value=json/order-v1
+await shop.declaredFeedSchema("orders");
+await shop.clearFeedSchema("orders");    // reverts to inheritance
 ```
 
 `SET SCHEMA ON DOMAIN|FEED <name> (KEY|VALUE <format> [SUBJECT 'x']
@@ -200,9 +201,10 @@ DLQ, idempotent outputs, counters — is
 ## Wire-level API
 
 ```ts
-const spec = StateStore.named("accounts.employees")
+const accounts = await client.createDomain("accounts");
+const spec = StateStore.named("employees")                          // -> accounts.employees
   .addKey("passport", true).addKey("department", false);           // up to 10 named keys
-const store = await client.stateStores.define(spec);               // durable store on the Nodes
+const store = await accounts.defineStateStore(spec);               // durable store on the Nodes
 
 await store.put("emp-1", payload, { passport: "P123", department: "eng" });
 const row = await store.get("emp-1");              // StoreRow | null + freshness
@@ -232,33 +234,38 @@ Managed Pipes and replicated Indexes share the same topology-free model
 
 ```ts
 // Pipe declaration: the client names the business key, source and
-// outputs — the server owns panes, leases and the effect journal.
-await client.defineForwardPipe("orders.relay", "orders-sub",
-  "orders.relayed");
-await client.defineEnrichPipe("orders.enrich", "orders-sub",
-  "orders.enriched", "crm.customers",
+// outputs — the server owns panes, leases and the effect journal. Every
+// endpoint is a ScopedRef: a bare string (or scoped.rel) resolves
+// in-domain; scoped.abs(...) or a Feed/Store handle crosses Domains —
+// the Pipe's name and input Subscription always stay in-domain.
+const orders = client.domain("orders");
+await orders.defineForwardPipe("relay", "orders-sub", "relayed");
+await orders.defineEnrichPipe("enrich", "orders-sub",
+  "enriched", scoped.abs("crm.customers"),   // lookup store lives in crm
   PipeOperation.enrich(Extractor.recordKey(),
     { freshness: "latest", onMiss: "quarantine" }),
-  "orders.enrich-dlq");
-await client.defineWindowPipe("orders.hourly", "orders-sub",
-  "stats.orders-hourly",
+  "enrich-dlq");
+await orders.defineWindowPipe("hourly", "orders-sub",
+  scoped.abs("stats.orders-hourly"),
   PipeOperation.window(Time.h(1),  // 1h panes
     Extractor.recordKey(), WindowAggregation.count(),
     { time: "event",
       watermark: Time.m(5),   // 5m horizon
       grace: Time.s(30),      // 30s late revisions
       expire: Time.h(2) }),
-  "orders.hourly-emitted");
+  "hourly-emitted");
 
 // Pipe lifecycle: describe, pause, resume, drop.
-const pipe = client.pipe("orders.relay");
+const pipe = orders.pipe("relay");
 const info = await pipe.describe();    // stage, operation, outputs, status
 await pipe.pause(); await pipe.resume(); await pipe.drop();
-const pipes = await client.pipes();    // the declared catalog
+const pipes = await orders.pipeInfos();    // the declared catalog, in-domain
 
-// Index queries: exact, prefix, or range predicates over typed values.
-const page = await client.queryIndex(
-  "crm.byregion",
+// Index queries: exact, prefix, or range predicates over typed values —
+// indexes stay same-Domain with their Feed.
+const crm = client.domain("crm");
+const page = await crm.queryIndex(
+  "byregion",
   indexPredicate.range(
     ["emea"], indexBound.inclusive(0), indexBound.exclusive(99)),
   { limit: 50, strict: true });

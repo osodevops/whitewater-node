@@ -18,8 +18,11 @@ import {
  *   window  — accumulate records into fixed event-time panes of a
  *             managed StateStore view; closed panes can EMIT to a Feed
  *
- * Pipes are declared by name only — no partitions, no Node placement.
- * Lifecycle is describe/pause/resume/drop on client.pipe(name).
+ * Pipes are declared inside a Domain — the Pipe's name and its input
+ * Subscription always live there; endpoints are ScopedRefs: a bare
+ * string resolves in-domain, `scoped.abs("other.name")` or a Feed/Store
+ * handle crosses Domains. Lifecycle is describe/pause/resume/drop on
+ * domain.pipe(name).
  *
  * Prerequisites: the dev cluster on localhost:7371-7373. The example
  * declares its own Domain, Feeds, StateStores, and Subscriptions, so it
@@ -41,67 +44,67 @@ const client = new WhitewaterClient({
 // One Domain owns every resource; each Pipe gets its own Subscription
 // (a Pipe owns its Subscription's driving frontier).
 
-await client.createDomain("pipes");
-await client.createFeed("pipes.in");
-await client.createFeed("pipes.out");
-await client.createFeed("pipes.enriched");
-await client.createFeed("pipes.dlq");
-await client.createFeed("pipes.emitted");
+const pipes = await client.createDomain("pipes");
+await pipes.createFeed("in");
+await pipes.createFeed("out");
+await pipes.createFeed("enriched");
+await pipes.createFeed("dlq");
+await pipes.createFeed("emitted");
 
 // Lookup store for the enrich Pipe (manual — rows arrive via put()).
-await client.stateStores.define(StateStore.named("pipes.profiles"));
+await pipes.defineStateStore(StateStore.named("profiles"));
 
 // Window pane store: the server writes pane rows keyed by (group, pane)
 // and requires non-unique named keys "key" and "pane" so the view is
 // enumerable without knowing composite row keys.
-await client.stateStores.define(
-  StateStore.named("pipes.panes").addKey("key").addKey("pane"),
+await pipes.defineStateStore(
+  StateStore.named("panes").addKey("key").addKey("pane"),
 );
 
-// Subscriptions are dotted resource names — one per Pipe.
-for (const sub of ["pipes.flow.copy", "pipes.flow.enrich", "pipes.flow.agg"]) {
-  await client.createSubscription(sub, "pipes.in");
+// Subscriptions are Domain-scoped — one per Pipe, all sourcing pipes.in.
+for (const sub of ["flow.copy", "flow.enrich", "flow.agg"]) {
+  await pipes.createSubscription(sub, "in");
 }
 
 // ---- forward: copy pipes.in -> pipes.out -------------------------------
 
-await client.defineForwardPipe("pipes.copy", "pipes.flow.copy", "pipes.out");
+await pipes.defineForwardPipe("copy", "flow.copy", "out");
 
 // ---- enrich: lookup pipes.profiles by record Key, misses quarantine ----
 
-await client.defineEnrichPipe(
-  "pipes.enrich",
-  "pipes.flow.enrich",
-  "pipes.enriched",
-  "pipes.profiles",
+await pipes.defineEnrichPipe(
+  "enrich",
+  "flow.enrich",
+  "enriched",
+  "profiles",
   PipeOperation.enrich(Extractor.recordKey(), { onMiss: "quarantine" }),
-  "pipes.dlq",
+  "dlq",
 );
 
 // ---- window: 8s event-time panes summing JSON 'amount' per 'customer' --
 
-await client.defineWindowPipe(
-  "pipes.agg",
-  "pipes.flow.agg",
-  "pipes.panes",
+await pipes.defineWindowPipe(
+  "agg",
+  "flow.agg",
+  "panes",
   PipeOperation.window(
     Time.s(8), // 8s panes — Time extracts the wire nanos internally
     Extractor.json("customer"),
     WindowAggregation.sum(Extractor.json("amount")),
     { maxLate: Time.s(15) },
   ),
-  "pipes.emitted", // closed panes publish here (requires a lateness bound)
+  "emitted", // closed panes publish here (requires a lateness bound)
 );
 
 // ---- lifecycle ----------------------------------------------------------
 
-const copy = client.pipe("pipes.copy");
+const copy = pipes.pipe("copy");
 const info = await copy.describe();
 console.log("describe pipes.copy:", info.stage, info.operation);
 
 await copy.pause(); // cooperative: in-flight effects finish, idempotent
 await copy.resume(); // resumes driving from the durable frontier
 
-for (const pipe of await client.pipes()) {
+for (const pipe of await pipes.pipeInfos()) {
   console.log(`${pipe.name}: stage=${pipe.stage} status=${pipe.status}`);
 }

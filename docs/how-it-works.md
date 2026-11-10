@@ -42,9 +42,11 @@ parsed or ordered.
 ## Resource management — two doors, one room
 
 `client.wcl(script)` sends raw WCL to `POST /v1/admin/wcl`. The typed
-methods are thin builders over it —
-`client.createFeed("orders.events")` serializes
-`CREATE FEED orders.events` and calls `wcl` internally.
+methods are thin builders over it — but they hang off `Domain`, not
+the client: `shop.createFeed("orders")` serializes
+`CREATE FEED shop.orders` and calls `wcl` internally. The Domain is
+the only front door — Feeds, Writers, Readers, Subscriptions, Pipes,
+StateStores, and Indexes are always declared inside one.
 
 Two validators run before interpolation, throwing `Error` locally:
 
@@ -80,20 +82,20 @@ The same calls through the typed builders — each serializes one WCL
 statement and calls `wcl` internally:
 
 ```ts
-await client.createDomain("shop");                  // CREATE DOMAIN shop;
-const shop = await client.getDomain("shop");        // verifies + materializes
+const shop = await client.createDomain("shop");     // CREATE DOMAIN shop;
 await shop.createFeed("orders");                    // CREATE FEED shop.orders;
-await client.createWriter("orders.writer", "shop.orders");
-await client.openWriterSession("orders.writer");    // epoch in .data
-await client.createReader("audit", "shop.orders", ReaderStart.beginning());
-await client.listFeeds();                           // SHOW FEEDS;
-await client.seekReader("audit", ReaderStart.now());// SEEK READER ... TO NOW;
-await client.dropFeed("shop.orders");               // DROP FEED shop.orders;
+await shop.createWriterFeed("writer", "orders");    // shop.writer -> shop.orders
+await shop.openWriterSession("writer");             // epoch in .data
+await shop.createReaderFeed("audit", "orders", ReaderStart.beginning());
+await shop.describeFeed("orders");                  // DESCRIBE FEED shop.orders;
+await shop.seekReader("audit", ReaderStart.now());  // SEEK READER ... TO NOW;
+await shop.dropFeed("orders");                      // DROP FEED shop.orders;
 ```
 
-`client.createFeed("shop.orders")` with the fully-qualified name is the
-flat-name equivalent; `domain.createFeed("orders")` composes the Domain
-prefix for you.
+Relative names compose inside the Domain (`"orders"` → `shop.orders`);
+for cross-Domain endpoints — a Subscription's source Feed, a Pipe's
+output — pass the other Domain's `Feed`/`Store` handle or
+`scoped.abs("other.events")` as the `ScopedRef`.
 
 `client.commands([...])` is the second door — the typed JSON command
 path for what WCL does not spell. Declaring a StateStore with named
@@ -112,7 +114,7 @@ await client.commands([{
 }]);
 ```
 
-(`client.stateStores.define(spec)` posts exactly this body for you.)
+(`domain.defineStateStore(spec)` posts exactly this body for you.)
 
 `DROP` is spelled in WCL for every resource including stores:
 `await client.wcl("DROP STATESTORE accounts.employees")` ≡ `store.drop()`.
@@ -121,36 +123,36 @@ await client.commands([{
 
 Three shapes, in increasing durability:
 
-1. **`feeds.records(feed, limit, after)`** — one-shot committed history.
-2. **`feeds.temporaryFetch(feed, { tail: true, waitMs, after, limit })`** —
+1. **`domain.feedOps().records(feed, limit, after)`** — one-shot committed history.
+2. **`domain.feedOps().temporaryFetch(feed, { tail: true, waitMs, after, limit })`** —
    anonymous ephemeral reader; `tail` + `waitMs` is a server-side
    long-poll that returns early when records arrive. Continue with
    `nextCursor`, never the last record's cursor.
-3. **`client.reader(name)`** — durable independent cursor:
+3. **`domain.reader(name)`** — durable independent cursor:
    `open` → `fetch` → `ack(deliveredCursor)` → `close`. Progress
    survives restarts.
 
 Two managed wrappers sit on top of those primitives:
 
-- **`feeds.load(feed, start, sink)`** — one-shot bulk read: pages
+- **`domain.feedOps().load(feed, start, sink)`** — one-shot bulk read: pages
   `temporaryFetch` from `ReaderStart` until the frontier is drained.
   `sink` is any `(records) => void` callback.
-- **`client.subscribe(reader, feed, start, onRecords[, onError])`** — a
+- **`domain.subscribe(reader, feed, start, onRecords[, onError])`** — a
   durable consume loop in the background: provisions the Reader when
   missing, then `open` → [`fetch` → `onRecords` → `ack`] → `close`.
   Transient errors retry; `StaleSession` and hard refusals terminate via
   `onError`/`subscription.failure`. `await sub.close()` stops it.
 
-`client.subscriptionMember(sub)` is the lease vocabulary for
+`domain.memberClient(sub)` is the lease vocabulary for
 cooperating consumers: `join` → `claim`/`renew`/`release` → `fetch` →
 `ack`.
 
 ## Writing
 
-- **Named session**: `openWriterSession(name)` returns a
-  `session_epoch` in `results[0].data`; bind `client.writer(name,
+- **Named session**: `domain.openWriterSession(name)` returns a
+  `session_epoch` in `results[0].data`; bind `domain.writer(name,
   epoch)` and `append` with a stable `requestId` per logical write.
-- **Ad-hoc**: `feeds.append(feed, feedAppend)` — ephemeral writer
+- **Ad-hoc**: `domain.feedOps().append(feed, feedAppend)` — ephemeral writer
   identity; same `requestId` dedup rule.
 
 ## Testing

@@ -6,13 +6,14 @@ RF3-replicated, Fjall-backed, and queryable from any Node. The SDK's
 projection, and every operation is an HTTP call with freshness evidence.
 
 ```ts
-const spec = StateStore.named("accounts.employees")
+const accounts = await client.createDomain("accounts");
+const spec = StateStore.named("employees")              // -> accounts.employees
   .addKey("passport", true)             // unique: one row per value
   .addKey("department", false);         // non-unique: value -> many rows
 
-const store = await client.stateStores.define(spec);   // manual store
+const store = await accounts.defineStateStore(spec);   // manual store
 // or a bound facade for an already-declared store:
-const same = client.stateStore("accounts.employees");
+const same = accounts.stateStore("employees");
 ```
 
 `addKey` records declaration intent used by `define` — named keys are
@@ -83,7 +84,7 @@ iteration's freshness evidence.
 
 ```ts
 await store.clear();                     // one journaled ClearAll
-await store.drop();                      // or client.stateStores.drop(name)
+await store.drop();                      // or accounts.dropStateStore("employees")
 ```
 
 - `clear` empties the store as one durable, idempotent mutation;
@@ -91,8 +92,9 @@ await store.drop();                      // or client.stateStores.drop(name)
 - `drop` tombstones the definition — the name cannot be recreated and
   every data path refuses. Rows already applied on replicas remain
   until a bounded reclaim pass.
-- Feed-sourced stores: `client.stateStores.define(spec, "accounts.events")`
-  materializes committed Feed history.
+- Feed-sourced stores: `accounts.defineStateStore(spec, "events")`
+  materializes committed Feed history — the source Feed may cross
+  Domains via its handle or `scoped.abs("other.events")`.
 
 ### Feed-sourced named keys
 
@@ -101,10 +103,10 @@ committed source record maps to typed lookup values. Every key carries
 an `Extractor`:
 
 ```ts
-const spec = StateStore.named("accounts.tagged")
+const spec = StateStore.named("tagged")
   .addKey("passport", true, Extractor.metadata("pp"))
   .addKey("department", false, Extractor.json("dept"));
-const store = await client.stateStores.define(spec, "accounts.events");
+const store = await accounts.defineStateStore(spec, "events");
 ```
 
 `Extractor.recordKey()` reads the record's key,
@@ -151,7 +153,7 @@ await client.commands([
 | `addKey` #11 / duplicate / blank | `Error` | Declaration contract (10-key bound, distinct names). |
 | `define` spec + `source` + bare named keys | `Error` | Feed-sourced keys need an `Extractor` — checked before the call. |
 | `define` manual spec + `Extractor` | `Error` | Extractors apply to feed-sourced stores only. |
-| Data op on unbound spec | `Error` | `StateStore.named` builds a spec; bind via `define` or `client.stateStore(name)`. |
+| Data op on unbound spec | `Error` | `StateStore.named` builds a spec; bind via `domain.defineStateStore` or `domain.stateStore(name)`. |
 | Unsafe/non-integer numeric value | `Error` | The wire carries exact i64 — pass a safe integer or bigint within range. |
 | Undeclared named key / missing store | `Refused` 400 | Server-side contract — fix the declaration. |
 | `mutationId` reused differently | `Refused` 409 | Retry with the original contents or a fresh ID. |

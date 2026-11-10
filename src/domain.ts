@@ -1,8 +1,14 @@
 import { codecs, type Codec } from "./codecs.js";
 import { Refused, WhitewaterError } from "./errors.js";
 import { Feed, FeedReader, FeedWriter } from "./feed.js";
-import type { ControlExecution, ReaderStart } from "./models.js";
+import type { ControlExecution, FeedRecord, ReaderStart } from "./models.js";
 import { ReaderStart as readerStart } from "./models.js";
+import { Pipe } from "./operations.js";
+import type { IndexPage, IndexPredicate, PipeInfo, PipeOperation } from "./operations.js";
+import { StateStore } from "./clients.js";
+import type { Subscription, SubscriptionMemberClient,
+  ReaderSessionClient, WriterSessionClient, FeedClient } from "./clients.js";
+import { Store } from "./store-view.js";
 import type { WhitewaterClient } from "./clients.js";
 
 /** Lowercase dotted names: `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`, ≤512 bytes. */
@@ -83,6 +89,57 @@ interface Snapshot {
   pipes: string[];
   indexes: string[];
   stateStores: string[];
+}
+
+/**
+ * An explicit endpoint reference — the cross-Domain vocabulary for
+ * Pipe endpoints, a Subscription's source Feed, or a StateStore's
+ * source. `scoped.rel("orders")` resolves inside the declaring Domain;
+ * `scoped.abs("other.events")` keeps a qualified name. A `Feed`,
+ * `Store`, `StateStore`, or `SubscriptionRef` handle also carries its
+ * absolute name — the deliberate cross-Domain edge.
+ */
+export interface Scoped {
+  readonly name: string;
+  readonly absolute: boolean;
+}
+
+export const scoped = {
+  /** A name inside the declaring Domain — the readable default. */
+  rel(name: string): Scoped {
+    return { name, absolute: false };
+  },
+  /** A fully-qualified `domain.name` — the deliberate cross-Domain edge. */
+  abs(name: string): Scoped {
+    return { name, absolute: true };
+  },
+};
+
+/** Anything a Pipe endpoint, Subscription source, or StateStore source
+ * accepts: a relative name (resolves in-domain), a {@link Scoped}, or a
+ * handle carrying its absolute name. */
+export type ScopedRef =
+  | string
+  | Scoped
+  | Feed<unknown, unknown>
+  | Store<unknown, unknown>
+  | StateStore
+  | SubscriptionRef;
+
+/** A scoped reference to a declared Subscription — a Pipe input in
+ * another declaration, or a member-lease target. */
+export class SubscriptionRef {
+  /** @internal */
+  constructor(
+    private readonly client: WhitewaterClient,
+    /** The Subscription's qualified `domain.name`. */
+    readonly name: string,
+  ) {}
+
+  /** The raw subscription-member client for this Subscription. */
+  memberClient(): SubscriptionMemberClient {
+    return this.client.subscriptionMember(this.name);
+  }
 }
 
 /**
@@ -262,7 +319,7 @@ export class Domain {
    * Accepts a relative name or a `Feed` handle.
    */
   createReader<K, V>(feed: Feed<K, V> | string): ReaderBuilder<K, V> {
-    return this.client.createReader(this, feed) as ReaderBuilder<K, V>;
+    return new ReaderBuilder<K, V>(this.client, this, asFeed(this, feed));
   }
 
   /**
@@ -271,10 +328,326 @@ export class Domain {
    * relative name or a `Feed` handle.
    */
   createWriter<K, V>(feed: Feed<K, V> | string): WriterBuilder<K, V> {
-    return this.client.createWriter(this, feed) as WriterBuilder<K, V>;
+    return new WriterBuilder<K, V>(this.client, this, asFeed(this, feed));
   }
 
-  private resolve(relative: string): string {
+  // ---- subscriptions, sessions, and the daily path -------------------------
+
+  /**
+   * `CREATE READER <name> FROM <feed>` inside this Domain —
+   * `shop.createReaderFeed("audit", "orders")` declares `shop.audit`
+   * consuming `shop.orders`. The feed argument is a {@link ScopedRef}:
+   * a relative name resolves in-domain while a `Feed` handle or
+   * `scoped.abs(...)` binds a Reader across Domains.
+   */
+  createReaderFeed(
+    name: string,
+    feed: ScopedRef,
+    start: ReaderStart = readerStart.beginning(),
+  ): Promise<ControlExecution> {
+    return this.client.createReader(
+      this.resolve(name), this.scopedName(feed), start);
+  }
+
+  /**
+   * `CREATE WRITER <name> TO <feed>` inside this Domain — same
+   * scoping as {@link createReaderFeed}.
+   */
+  createWriterFeed(
+    name: string,
+    feed: ScopedRef,
+  ): Promise<ControlExecution> {
+    return this.client.createWriter(
+      this.resolve(name), this.scopedName(feed));
+  }
+
+  /**
+   * `CREATE SUBSCRIPTION <name> FROM <feed>` inside this Domain — the
+   * Subscription and its durable progress are owned here; the source
+   * Feed may live in another Domain via its handle or `scoped.abs(...)`.
+   */
+  createSubscription(
+    name: string,
+    feed: ScopedRef,
+    start: ReaderStart = readerStart.beginning(),
+  ): Promise<ControlExecution> {
+    return this.client.createSubscription(
+      this.resolve(name), this.scopedName(feed), start);
+  }
+
+  /** A scoped reference to a Subscription inside this Domain — a Pipe
+   * input in another declaration or a member-lease target. */
+  subscription(relative: string): SubscriptionRef {
+    return new SubscriptionRef(this.client, this.resolve(relative));
+  }
+
+  /** The raw subscription-member client inside this Domain —
+   * join/claim/renew/release/fetch/ack under fenced leases. */
+  memberClient(subscription: string): SubscriptionMemberClient {
+    return this.client.subscriptionMember(this.resolve(subscription));
+  }
+
+  /** A named-Writer session inside this Domain — epoch from
+   * {@link openWriterSession}. Prefer `Feed.writer` or the
+   * `WriterBuilder` for the typed route. */
+  writer(name: string, sessionEpoch: number): WriterSessionClient {
+    return this.client.writer(this.resolve(name), sessionEpoch);
+  }
+
+  /** A named-Reader session inside this Domain —
+   * open/fetch/ack/close with explicit session state. */
+  reader(name: string): ReaderSessionClient {
+    return this.client.reader(this.resolve(name));
+  }
+
+  /**
+   * Subscribe durably inside this Domain: ensures the Reader exists
+   * (creating it at `start` when missing), opens a session, and invokes
+   * `onRecords` per fetched page in the background, acknowledging after
+   * each batch. The feed may point at another Domain through a `Feed`
+   * handle or `scoped.abs(...)`.
+   */
+  subscribe(
+    reader: string,
+    feed: ScopedRef,
+    start: ReaderStart,
+    onRecords: (records: FeedRecord[]) => void | Promise<void>,
+    onError?: (error: WhitewaterError) => void,
+  ): Subscription {
+    return this.client.subscribe(
+      this.resolve(reader), this.scopedName(feed), start,
+      onRecords, onError);
+  }
+
+  /** `OPEN WRITER SESSION <name>` — the epoch comes back in the
+   * execution's data. */
+  openWriterSession(writer: string): Promise<ControlExecution> {
+    return this.client.openWriterSession(this.resolve(writer));
+  }
+
+  /** `SEEK READER <name> TO <start>` inside this Domain. */
+  seekReader(reader: string, start: ReaderStart): Promise<ControlExecution> {
+    return this.client.seekReader(this.resolve(reader), start);
+  }
+
+  /** The byte-level `FeedClient` — committed reads, anonymous
+   * temporary fetches, and ad-hoc appends. */
+  feedOps(): FeedClient {
+    return this.client.feeds;
+  }
+
+  // ---- resource lifecycle --------------------------------------------------
+
+  /** `DESCRIBE FEED <name>` inside this Domain. */
+  describeFeed(relative: string): Promise<ControlExecution> {
+    return this.client.describeFeed(this.resolve(relative));
+  }
+
+  /** `DESCRIBE WRITER <name>` inside this Domain. */
+  describeWriter(relative: string): Promise<ControlExecution> {
+    return this.client.describeWriter(this.resolve(relative));
+  }
+
+  /** `DESCRIBE READER <name>` inside this Domain. */
+  describeReader(relative: string): Promise<ControlExecution> {
+    return this.client.describeReader(this.resolve(relative));
+  }
+
+  /** `DESCRIBE SUBSCRIPTION <name>` inside this Domain. */
+  describeSubscription(relative: string): Promise<ControlExecution> {
+    return this.client.describeSubscription(this.resolve(relative));
+  }
+
+  /** `RENAME FEED <current> TO <renamed>` — both names resolve in-domain. */
+  renameFeed(current: string, renamed: string): Promise<ControlExecution> {
+    return this.client.renameFeed(this.resolve(current), this.resolve(renamed));
+  }
+
+  /** `RENAME WRITER <current> TO <renamed>` in-domain. */
+  renameWriter(current: string, renamed: string): Promise<ControlExecution> {
+    return this.client.renameWriter(this.resolve(current), this.resolve(renamed));
+  }
+
+  /** `RENAME READER <current> TO <renamed>` in-domain. */
+  renameReader(current: string, renamed: string): Promise<ControlExecution> {
+    return this.client.renameReader(this.resolve(current), this.resolve(renamed));
+  }
+
+  /** `RENAME SUBSCRIPTION <current> TO <renamed>` in-domain. */
+  renameSubscription(current: string, renamed: string): Promise<ControlExecution> {
+    return this.client.renameSubscription(this.resolve(current), this.resolve(renamed));
+  }
+
+  /** `DROP FEED <name>` inside this Domain. */
+  dropFeed(relative: string): Promise<ControlExecution> {
+    return this.client.dropFeed(this.resolve(relative));
+  }
+
+  /** `DROP WRITER <name>` inside this Domain. */
+  dropWriter(relative: string): Promise<ControlExecution> {
+    return this.client.dropWriter(this.resolve(relative));
+  }
+
+  /** `DROP READER <name>` inside this Domain. */
+  dropReader(relative: string): Promise<ControlExecution> {
+    return this.client.dropReader(this.resolve(relative));
+  }
+
+  /** `DROP SUBSCRIPTION <name>` inside this Domain. */
+  dropSubscription(relative: string): Promise<ControlExecution> {
+    return this.client.dropSubscription(this.resolve(relative));
+  }
+
+  /** `SET SCHEMA ON FEED <feed>` inside this Domain. */
+  setFeedSchema(relative: string, schema: FeedSchema): Promise<ControlExecution> {
+    return this.client.setFeedSchema(this.resolve(relative), schema);
+  }
+
+  /** `DROP SCHEMA ON FEED <feed>` inside this Domain. */
+  clearFeedSchema(relative: string): Promise<ControlExecution> {
+    return this.client.clearFeedSchema(this.resolve(relative));
+  }
+
+  // ---- pipes, stores, indexes ----------------------------------------------
+
+  /** The lifecycle handle for a Pipe inside this Domain —
+   * describe/pause/resume/drop. */
+  pipe(relative: string): Pipe {
+    return this.client.pipe(this.resolve(relative));
+  }
+
+  /** Declared Pipes inside this Domain as `PipeInfo` rows. */
+  async pipeInfos(): Promise<PipeInfo[]> {
+    const all = await this.client.pipes();
+    const prefix = this.name + ".";
+    return all.filter((info) => info.name.startsWith(prefix));
+  }
+
+  /**
+   * `DEFINE PIPE <name> ... TO FEED` inside this Domain — the copy
+   * Pipe. Every endpoint is a {@link ScopedRef}: a bare string or
+   * `scoped.rel(...)` resolves in-domain; a handle or `scoped.abs(...)`
+   * crosses Domains. The input Subscription must belong to this Domain
+   * (it is the Pipe's own durable frontier); the output Feed may live
+   * anywhere.
+   */
+  defineForwardPipe(
+    name: string,
+    subscription: ScopedRef,
+    outputFeed: ScopedRef,
+  ): Promise<ControlExecution> {
+    return this.client.defineForwardPipe(
+      this.resolve(name), this.scopedName(subscription), this.scopedName(outputFeed));
+  }
+
+  /** `DEFINE PIPE ... ENRICH` inside this Domain — every endpoint
+   * follows the {@link ScopedRef} rule. */
+  defineEnrichPipe(
+    name: string,
+    subscription: ScopedRef,
+    outputFeed: ScopedRef,
+    store: ScopedRef,
+    operation: PipeOperation,
+    quarantineFeed?: ScopedRef,
+  ): Promise<ControlExecution> {
+    return this.client.defineEnrichPipe(
+      this.resolve(name), this.scopedName(subscription),
+      this.scopedName(outputFeed), this.scopedName(store),
+      operation,
+      quarantineFeed === undefined ? undefined : this.scopedName(quarantineFeed));
+  }
+
+  /** `DEFINE PIPE ... TO STATESTORE` inside this Domain — every
+   * endpoint follows the {@link ScopedRef} rule. */
+  defineWindowPipe(
+    name: string,
+    subscription: ScopedRef,
+    outputStore: ScopedRef,
+    operation: PipeOperation,
+    emitFeed?: ScopedRef,
+  ): Promise<ControlExecution> {
+    return this.client.defineWindowPipe(
+      this.resolve(name), this.scopedName(subscription),
+      this.scopedName(outputStore), operation,
+      emitFeed === undefined ? undefined : this.scopedName(emitFeed));
+  }
+
+  /** The byte-level StateStore facade inside this Domain —
+   * `shop.stateStore("profiles")` binds `shop.profiles`. */
+  stateStore(relative: string): StateStore {
+    return this.client.stateStore(this.resolve(relative));
+  }
+
+  /**
+   * A codec-bound Store facade inside this Domain:
+   * `domain.store(name)` binds `Store<string, string>`; a second
+   * argument types the payload; three arguments bind both codecs.
+   */
+  store(relative: string): Store<string, string>;
+  store<V>(relative: string, valueCodec: Codec<V>): Store<string, V>;
+  store<K, V>(relative: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Store<K, V>;
+  store<K, V>(
+    relative: string,
+    a?: Codec<K> | Codec<V>,
+    b?: Codec<V>,
+  ): Store<K, V> | Store<string, V> | Store<string, string> {
+    const keyCodec = b !== undefined ? (a as Codec<K>) : (codecs.utf8() as unknown as Codec<K>);
+    const valueCodec = (b ?? a ?? codecs.utf8()) as Codec<V>;
+    return Store.bind(this.stateStore(relative), keyCodec, valueCodec);
+  }
+
+  /**
+   * `DEFINE STATESTORE` inside this Domain — the spec's name resolves
+   * in-domain (`StateStore.named("employees")` on `accounts` declares
+   * `accounts.employees`); `source` names the Feed it materializes
+   * from (undefined = manual) and may cross Domains via a `Feed`
+   * handle or `scoped.abs(...)`.
+   */
+  async defineStateStore(spec: StateStore, source?: ScopedRef): Promise<StateStore> {
+    const full = this.resolve(spec.name);
+    const rescoped = StateStore.named(full);
+    for (const key of spec.namedKeys) {
+      rescoped.addKey(key.name, key.unique, key.extractor);
+    }
+    return this.client.stateStores.define(
+      rescoped, source === undefined ? undefined : this.scopedName(source));
+  }
+
+  /** `DROP STATESTORE <name>` inside this Domain. */
+  dropStateStore(relative: string): Promise<ControlExecution> {
+    return this.client.stateStores.drop(this.resolve(relative));
+  }
+
+  /** Query a replicated Index inside this Domain — the index name
+   * resolves in-domain (indexes stay same-Domain with their Feed). */
+  queryIndex(
+    relative: string,
+    predicate: IndexPredicate,
+    options: { limit?: number; strict?: boolean; waitMs?: number } = {},
+  ): Promise<IndexPage> {
+    return this.client.queryIndex(this.resolve(relative), predicate, options);
+  }
+
+  /**
+   * Resolve a {@link ScopedRef} to its qualified wire name — bare
+   * strings and `scoped.rel(...)` compose inside this Domain; handles
+   * and `scoped.abs(...)` carry qualified names.
+   */
+  scopedName(ref: ScopedRef): string {
+    if (typeof ref === "string") return this.resolve(ref);
+    if (ref instanceof SubscriptionRef) return ref.name;
+    if (typeof (ref as Scoped).absolute === "boolean") {
+      const s = ref as Scoped;
+      return s.absolute ? dotted(s.name) : this.resolve(s.name);
+    }
+    return (ref as { name: string }).name;
+  }
+
+  // ---- name resolution -------------------------------------------------------
+
+  /** @internal — relative-name resolution; callers pass
+   * {@link ScopedRef}s, never raw dotted strings. */
+  resolve(relative: string): string {
     if (relative == null) throw new Error("feed name is required");
     const full = relative.startsWith(this.name + ".") ? relative : `${this.name}.${relative}`;
     return dotted(full);
@@ -423,7 +796,9 @@ export class ReaderBuilder<K, V> {
           " (the Kafka groupId analogue)",
       );
     }
-    return this.id;
+    // Reader identities are Domain resources — "fulfillment" inside
+    // "shop" declares shop.fulfillment, never a global name.
+    return this.domain.resolve(this.id);
   }
 }
 
@@ -461,7 +836,8 @@ export class WriterBuilder<K, V> {
     if (this.id === null) {
       throw new Error("writerId(...) is required");
     }
-    return this.id;
+    // Writer identities are Domain resources — same rule as readerId.
+    return this.domain.resolve(this.id);
   }
 }
 

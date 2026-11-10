@@ -18,8 +18,8 @@ import { codecs, textMetadata, WhitewaterClient } from "../dist/index.js";
  * server-side cursor across restarts. No offset management, ever.
  *
  * Prerequisites (against the dev cluster): domain "users", feeds
- * users.update.request / users.update.enriched.request /
- * users.update.dlq, StateStore users.profiles with named key "user_id",
+ * update.request / update.enriched.request / update.dlq inside the
+ * "users" Domain, StateStore users.profiles with named key "user_id",
  * manual store users.stats.
  *
  * Replay honesty: between "enriched append committed" and "input acked"
@@ -40,16 +40,17 @@ const client = new WhitewaterClient({
   ],
 });
 
-// ---- surfaces, codec-bound once --------------------------------------
+// ---- surfaces, codec-bound once — everything hangs off the Domain ---
 
-const inFeed = client.feed("users.update.request", codecs.json());
-const outFeed = client.feed("users.update.enriched.request", codecs.json());
-const dlqFeed = client.feed("users.update.dlq", codecs.json());
+const users = client.domain("users");
+const inFeed = users.feed("update.request", codecs.json());
+const outFeed = users.feed("update.enriched.request", codecs.json());
+const dlqFeed = users.feed("dlq", codecs.json());
 
 // users store: primary key email, declared named key "user_id".
-const users = client.store("users.profiles", codecs.json());
+const profiles = users.store("profiles", codecs.json());
 // counters store: bucket key -> running total.
-const counters = client.store("users.stats", codecs.json());
+const counters = users.store("stats", codecs.json());
 
 const outWriter = await outFeed.writer("enricher");
 const dlqWriter = await dlqFeed.writer("enricher");
@@ -62,11 +63,11 @@ async function process(msg) {
   const req = msg.value;
 
   // 1. primary-key lookup by email — value only, no row unwrapping
-  let profile = req.userEmail ? await users.find(req.userEmail) : null;
+  let profile = req.userEmail ? await profiles.find(req.userEmail) : null;
 
   // 2. named-key fallback — the declared "user_id" index on the store
   if (profile === null && req.userId) {
-    profile = await users.findBy("user_id", req.userId);
+    profile = await profiles.findBy("user_id", req.userId);
   }
 
   // Idempotency key for every effect this input produces: a replay

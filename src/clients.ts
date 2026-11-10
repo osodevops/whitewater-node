@@ -492,11 +492,15 @@ export interface WhitewaterClientOptions {
 }
 
 export class WhitewaterClient {
+  /** @internal — byte-level feed ops; app code binds
+   * `Domain.feedOps()`/typed `Feed`s through the Domain. */
   readonly feeds: FeedClient;
   /** Shared transport; exposed for low-level/operator calls not yet
    * covered by a typed facade. */
   readonly transport: Transport;
 
+  /** @internal — StateStore declaration/binding; the Domain-first
+   * route is `Domain.defineStateStore`/`Domain.stateStore`. */
   readonly stateStores: StateStoresClient;
 
   constructor(options: WhitewaterClientOptions) {
@@ -529,13 +533,13 @@ export class WhitewaterClient {
 
   // ---- Pipe lifecycle ---------------------------------------------------------
 
-  /** Bind a declared Pipe for lifecycle operations:
-   * describe/pause/resume/drop. */
+  /** @internal — bind a declared Pipe via {@link Domain.pipe}
+   * instead. */
   pipe(name: string): Pipe {
     return new Pipe(this, name);
   }
 
-  /** `SHOW PIPES`: the catalog of declared Pipes. */
+  /** @internal — the Domain-scoped route is {@link Domain.pipeInfos}. */
   async pipes(): Promise<PipeInfo[]> {
     const execution = await this.commands([{ command: "show", kind: "pipes" }]);
     return decodePipes(execution.results[0]?.data ?? []);
@@ -543,11 +547,8 @@ export class WhitewaterClient {
 
   // ---- Pipe declaration --------------------------------------------------------
 
-  /**
-   * `DEFINE PIPE <name> FROM SUBSCRIPTION <subscription> TO FEED <feed>` —
-   * the copy Pipe. `name`, `subscription`, and `outputFeed` are
-   * same-Domain dotted names.
-   */
+  /** @internal — `DEFINE PIPE ... TO FEED`; declare via
+   * {@link Domain.defineForwardPipe}. */
   defineForwardPipe(
     name: string,
     subscription: string,
@@ -564,12 +565,8 @@ export class WhitewaterClient {
     ]);
   }
 
-  /**
-   * `DEFINE PIPE ... ENRICH STATESTORE <store>` — point-lookup
-   * enrichment. `operation` must be {@link PipeOperation.enrich};
-   * `quarantineFeed` resolves the miss-quarantine target when the
-   * operation's miss disposition is `"quarantine"`.
-   */
+  /** @internal — `DEFINE PIPE ... ENRICH`; declare via
+   * {@link Domain.defineEnrichPipe}. */
   defineEnrichPipe(
     name: string,
     subscription: string,
@@ -595,12 +592,8 @@ export class WhitewaterClient {
     return this.commands([command]);
   }
 
-  /**
-   * `DEFINE PIPE ... TO STATESTORE <store>` — rolling-window
-   * aggregation. `operation` must be {@link PipeOperation.window};
-   * `emitFeed` optionally publishes closed panes and requires the
-   * operation declare a lateness bound (`maxLate` or `watermark`).
-   */
+  /** @internal — `DEFINE PIPE ... TO STATESTORE`; declare via
+   * {@link Domain.defineWindowPipe}. */
   defineWindowPipe(
     name: string,
     subscription: string,
@@ -626,9 +619,8 @@ export class WhitewaterClient {
 
   // ---- Index queries ------------------------------------------------------------
 
-  /** Query a replicated Index by predicate — exact, prefix, or range
-   * over typed values. `strict` waits for the committed target rather
-   * than answering stale. */
+  /** @internal — query a replicated Index via
+   * {@link Domain.queryIndex}. */
   async queryIndex(
     index: string,
     predicate: IndexPredicate,
@@ -701,7 +693,8 @@ export class WhitewaterClient {
     }]);
   }
 
-  /** `SET SCHEMA ON FEED <feed>` — overrides the named sides. */
+  /** @internal — `SET SCHEMA ON FEED`; use
+   * {@link Domain.setFeedSchema}. */
   async setFeedSchema(feed: string, schema: FeedSchema): Promise<ControlExecution> {
     return this.commands([{
       command: "set_schema",
@@ -718,7 +711,8 @@ export class WhitewaterClient {
     }]);
   }
 
-  /** `DROP SCHEMA ON FEED <feed>` — reverts to Domain inheritance. */
+  /** @internal — `DROP SCHEMA ON FEED`; use
+   * {@link Domain.clearFeedSchema}. */
   async clearFeedSchema(feed: string): Promise<ControlExecution> {
     return this.commands([{
       command: "clear_schema",
@@ -726,22 +720,25 @@ export class WhitewaterClient {
     }]);
   }
 
-  createDomain(name: string): Promise<ControlExecution> {
-    return this.wcl(`CREATE DOMAIN ${dotted(name)}`);
+  /** `CREATE DOMAIN <name>` — returns the Domain handle so every
+   * resource hangs off it: `await client.createDomain("pipes")` then
+   * `pipes.createFeed("orders")`. */
+  createDomain(name: string): Promise<Domain> {
+    const checked = dotted(name); // invalid names fail synchronously
+    return this.wcl(`CREATE DOMAIN ${checked}`).then(() => this.domain(name));
   }
 
-  /** `CREATE FEED <dotted.name>` */
+  /** @internal — `CREATE FEED`; use {@link Domain.createFeed}. */
   createFeed(name: string): Promise<ControlExecution> {
     return this.wcl(`CREATE FEED ${dotted(name)}`);
   }
 
-  /**
-   * `CREATE WRITER <name> TO <feed>` — or, when the first argument is
-   * a {@link Domain}, a fluent {@link WriterBuilder}:
-   * `client.createWriter(domain, feed).writerId("orders.ingest").open()`.
-   */
+  /** @internal — `CREATE WRITER`; use {@link Domain.createWriter}
+   * (fluent builder) or {@link Domain.createWriterFeed} (raw). */
   createWriter(name: string, feed: string): Promise<ControlExecution>;
+  /** @internal */
   createWriter<K, V>(domain: Domain, feed: Feed<K, V> | string): WriterBuilder<K, V>;
+  /** @internal */
   createWriter<K, V>(
     nameOrDomain: string | Domain,
     feed: Feed<K, V> | string,
@@ -752,19 +749,16 @@ export class WhitewaterClient {
     return this.wcl(`CREATE WRITER ${resource(nameOrDomain)} TO ${dotted(feed as string)}`);
   }
 
-  /**
-   * `CREATE READER <name> FROM <feed> [START AT <start>]` (default
-   * BEGINNING) — or, when the first argument is a {@link Domain}, a
-   * fluent {@link ReaderBuilder}:
-   * `client.createReader(domain, feed).readerId("audit")
-   * .readerStartPoint(ReaderStart.BEGINNING).open()`.
-   */
+  /** @internal — `CREATE READER`; use {@link Domain.createReader}
+   * (fluent builder) or {@link Domain.createReaderFeed} (raw). */
   createReader(
     name: string,
     feed: string,
     start?: ReaderStart,
   ): Promise<ControlExecution>;
+  /** @internal */
   createReader<K, V>(domain: Domain, feed: Feed<K, V> | string): ReaderBuilder<K, V>;
+  /** @internal */
   createReader<K, V>(
     nameOrDomain: string | Domain,
     feed: Feed<K, V> | string,
@@ -780,11 +774,12 @@ export class WhitewaterClient {
   }
 
   // ---- strongly-typed Domains ---------------------------------------------
-  // A Domain owns every Feed it prefixes (shop owns shop.orders). The
-  // typed entry point:
+  // A Domain owns every Feed it prefixes (shop owns shop.orders) — and
+  // the Domain is the only front door: every Feed, Writer, Reader,
+  // Subscription, Pipe, StateStore, and Index hangs off it:
   //
   //   const shop = await client.getDomain("shop");
-  //   const reader = await client.createReader(shop, shop.feed("orders"))
+  //   const reader = await shop.createReader("orders")
   //     .readerId("fulfillment")
   //     .readerStartPoint(ReaderStart.BEGINNING)
   //     .open();
@@ -801,7 +796,8 @@ export class WhitewaterClient {
     return this.domain(name).refresh();
   }
 
-  /** `CREATE SUBSCRIPTION <name> FROM <feed> [START AT <start>]`. */
+  /** @internal — `CREATE SUBSCRIPTION`; use
+   * {@link Domain.createSubscription}. */
   createSubscription(
     name: string,
     feed: string,
@@ -817,12 +813,13 @@ export class WhitewaterClient {
     return this.wcl(`CREATE ROLE ${resource(name)}`);
   }
 
-  /** `OPEN WRITER SESSION <name>`; the returned epoch feeds {@link writer}. */
+  /** @internal — `OPEN WRITER SESSION`; use
+   * {@link Domain.openWriterSession}. */
   openWriterSession(writer: string): Promise<ControlExecution> {
     return this.wcl(`OPEN WRITER SESSION ${resource(writer)}`);
   }
 
-  /** `SEEK READER <name> TO <start>` — repositions a durable Reader. */
+  /** @internal — `SEEK READER`; use {@link Domain.seekReader}. */
   seekReader(reader: string, start: ReaderStart): Promise<ControlExecution> {
     return this.wcl(`SEEK READER ${resource(reader)} TO ${readerStart.wcl(start)}`);
   }
@@ -831,15 +828,19 @@ export class WhitewaterClient {
   describeDomain(name: string): Promise<ControlExecution> {
     return this.describe("DOMAIN", name, true);
   }
+  /** @internal — use `Domain.describeFeed`. */
   describeFeed(name: string): Promise<ControlExecution> {
     return this.describe("FEED", name, true);
   }
+  /** @internal — use `Domain.describeWriter`. */
   describeWriter(name: string): Promise<ControlExecution> {
     return this.describe("WRITER", name, false);
   }
+  /** @internal — use `Domain.describeReader`. */
   describeReader(name: string): Promise<ControlExecution> {
     return this.describe("READER", name, false);
   }
+  /** @internal — use `Domain.describeSubscription`. */
   describeSubscription(name: string): Promise<ControlExecution> {
     return this.describe("SUBSCRIPTION", name, false);
   }
@@ -851,15 +852,19 @@ export class WhitewaterClient {
   renameDomain(current: string, renamed: string): Promise<ControlExecution> {
     return this.rename("DOMAIN", current, renamed, true);
   }
+  /** @internal — use `Domain.renameFeed`. */
   renameFeed(current: string, renamed: string): Promise<ControlExecution> {
     return this.rename("FEED", current, renamed, true);
   }
+  /** @internal — use `Domain.renameWriter`. */
   renameWriter(current: string, renamed: string): Promise<ControlExecution> {
     return this.rename("WRITER", current, renamed, false);
   }
+  /** @internal — use `Domain.renameReader`. */
   renameReader(current: string, renamed: string): Promise<ControlExecution> {
     return this.rename("READER", current, renamed, false);
   }
+  /** @internal — use `Domain.renameSubscription`. */
   renameSubscription(current: string, renamed: string): Promise<ControlExecution> {
     return this.rename("SUBSCRIPTION", current, renamed, false);
   }
@@ -871,15 +876,19 @@ export class WhitewaterClient {
   dropDomain(name: string): Promise<ControlExecution> {
     return this.drop("DOMAIN", name, true);
   }
+  /** @internal — use `Domain.dropFeed`. */
   dropFeed(name: string): Promise<ControlExecution> {
     return this.drop("FEED", name, true);
   }
+  /** @internal — use `Domain.dropWriter`. */
   dropWriter(name: string): Promise<ControlExecution> {
     return this.drop("WRITER", name, false);
   }
+  /** @internal — use `Domain.dropReader`. */
   dropReader(name: string): Promise<ControlExecution> {
     return this.drop("READER", name, false);
   }
+  /** @internal — use `Domain.dropSubscription`. */
   dropSubscription(name: string): Promise<ControlExecution> {
     return this.drop("SUBSCRIPTION", name, false);
   }
@@ -891,15 +900,19 @@ export class WhitewaterClient {
   listDomains(): Promise<ControlExecution> {
     return this.wcl("SHOW DOMAINS");
   }
+  /** @internal — the Domain's catalog accessors scope the rows. */
   listFeeds(): Promise<ControlExecution> {
     return this.wcl("SHOW FEEDS");
   }
+  /** @internal — the Domain's catalog accessors scope the rows. */
   listWriters(): Promise<ControlExecution> {
     return this.wcl("SHOW WRITERS");
   }
+  /** @internal — the Domain's catalog accessors scope the rows. */
   listReaders(): Promise<ControlExecution> {
     return this.wcl("SHOW READERS");
   }
+  /** @internal — the Domain's catalog accessors scope the rows. */
   listSubscriptions(): Promise<ControlExecution> {
     return this.wcl("SHOW SUBSCRIPTIONS");
   }
@@ -928,30 +941,18 @@ export class WhitewaterClient {
     return this.wcl(`DROP ${kind} ${dottedName ? dotted(name) : resource(name)}`);
   }
 
+  /** @internal — bind a named-Writer session via
+   * {@link Domain.writer}. */
   writer(name: string, sessionEpoch: number): WriterSessionClient {
     return new WriterSessionClient(this.transport, name, sessionEpoch);
   }
 
-  /**
-   * A codec-bound Feed facade — serialization is bound once so every
-   * write encodes and every read decodes automatically:
-   *
-   * ```ts
-   * const orders = client.feed("orders.events", codecs.json<Order>());
-   * const writer = await orders.writer("ingest");
-   * await writer.append("order-1", order);        // JSON-encoded
-   * const reader = await orders.reader("audit", 64);
-   * const page = await reader.fetch();            // FeedMessage<string, Order>[]
-   * ```
-   *
-   * `client.feed(name)` binds the default `Feed<string, string>` —
-   * UTF-8 strings both ways, so un-schema-backed JSON flows with zero
-   * codec ceremony. `client.feed(name, valueCodec)` keeps UTF-8 keys (the common
-   * case); the three-argument form binds both codecs explicitly —
-   * protobuf/msgpack/custom via {@link codecs.custom}.
-   */
+  /** @internal — bind a codec-bound `Feed` inside a Domain via
+   * {@link Domain.feed} instead. */
   feed(name: string): Feed<string, string>;
+  /** @internal */
   feed<V>(name: string, valueCodec: Codec<V>): Feed<string, V>;
+  /** @internal */
   feed<K, V>(name: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Feed<K, V>;
   feed<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Feed<K, V> | Feed<string, V> | Feed<string, string> {
     const keyCodec = b !== undefined ? (a as Codec<K>) : (codecs.utf8() as unknown as Codec<K>);
@@ -959,15 +960,12 @@ export class WhitewaterClient {
     return new Feed<K, V>(this, dotted(name), keyCodec, valueCodec);
   }
 
-  /**
-   * A codec-bound StateStore facade — every `get`/`put`/`iterate`
-   * serializes through the bound codecs. `client.store(name)` binds
-   * `Store<string, string>`; a second argument types the payload
-   * (UTF-8 keys); three arguments bind both codecs. The byte-level
-   * {@link stateStore} facade remains for raw access and declaration.
-   */
+  /** @internal — bind a codec-bound `Store` inside a Domain via
+   * {@link Domain.store} instead. */
   store(name: string): Store<string, string>;
+  /** @internal */
   store<V>(name: string, valueCodec: Codec<V>): Store<string, V>;
+  /** @internal */
   store<K, V>(name: string, keyCodec: Codec<K>, valueCodec: Codec<V>): Store<K, V>;
   store<K, V>(name: string, a?: Codec<K> | Codec<V>, b?: Codec<V>): Store<K, V> | Store<string, V> | Store<string, string> {
     const bound = StateStore.bound(this.transport, name);
@@ -976,28 +974,20 @@ export class WhitewaterClient {
     return Store.bind(bound, keyCodec, valueCodec);
   }
 
+  /** @internal — bind a named-Reader session via
+   * {@link Domain.reader}. */
   reader(name: string): ReaderSessionClient {
     return new ReaderSessionClient(this.transport, name);
   }
 
+  /** @internal — bind the member client via
+   * {@link Domain.memberClient}. */
   subscriptionMember(subscription: string): SubscriptionMemberClient {
     return new SubscriptionMemberClient(this.transport, subscription);
   }
 
-  /**
-   * Subscribe durably to a Feed: ensures a Reader named `reader` exists
-   * (creating it at `start` when missing), opens a session, and invokes
-   * `onRecords` per fetched page in the background, acknowledging after
-   * each batch. The returned {@link Subscription} runs until `close()`;
-   * terminal errors reach `onError` and `subscription.failure`.
-   *
-   * ```ts
-   * const sub = client.subscribe("hr-view", "hr.employees",
-   *   ReaderStart.beginning(), (records) => handle(records));
-   * // ...later
-   * await sub.close();
-   * ```
-   */
+  /** @internal — subscribe durably via {@link Domain.subscribe} or
+   * {@link Feed.subscribe}. */
   subscribe(
     reader: string,
     feed: string,
@@ -1017,10 +1007,8 @@ export class WhitewaterClient {
     );
   }
 
-  /**
-   * A thin facade over the node-side StateStore `name` — rows live on
-   * the Nodes (RF3 + Fjall); this client holds no state.
-   */
+  /** @internal — the byte-level StateStore facade; the Domain-first
+   * route is {@link Domain.stateStore}. */
   stateStore(name: string): StateStore {
     return StateStore.bound(this.transport, name);
   }
@@ -1032,9 +1020,10 @@ export class WhitewaterClient {
  * Declare it with named keys, then put/get/delete/iterate:
  *
  * ```ts
- * const spec = StateStore.named("accounts.employees")
+ * const accounts = await client.createDomain("accounts");
+ * const spec = StateStore.named("employees")
  *   .addKey("passport", true).addKey("department", false);
- * const store = await client.stateStores.define(spec);
+ * const store = await accounts.defineStateStore(spec);
  *
  * await store.put(Buffer.from("user-1"), Buffer.from("profile-1"),
  *   { passport: "P111", department: "eng" });

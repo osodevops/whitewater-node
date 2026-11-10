@@ -6,7 +6,7 @@ import { ReaderStart, WhitewaterClient } from "../dist/index.js";
  * pattern for applications, versus the ephemeral tail in tail-feed.mjs.
  *
  * For a managed loop — auto-provisioning, retry policy, and a
- * close()-able handle — use client.subscribe(...) instead of this
+ * close()-able handle — use domain.subscribe(...) instead of this
  * explicit form.
  *
  * The loop below is explicit — Whitewater Readers pull rather than push:
@@ -27,13 +27,13 @@ const client = new WhitewaterClient({
   ],
 });
 
-// One-time provisioning: the Reader declaration is durable Control
-// Plane state, not a per-session object.
-await client.createDomain("demo");
-await client.createFeed("demo.tail");
-await client.createReader("demo.reader", "demo.tail", ReaderStart.beginning());
+// One-time provisioning: the Domain owns every resource, and the Reader
+// declaration is durable Control Plane state, not a per-session object.
+const demo = await client.createDomain("demo");
+await demo.createFeed("tail");
+await demo.createReaderFeed("reader", "tail", ReaderStart.beginning());
 
-const reader = client.reader("demo.reader");
+const reader = demo.reader("reader");
 
 // open() fences this client as the session owner. Another client
 // opening the same Reader supersedes this session (stale_epoch on the
@@ -46,7 +46,7 @@ try {
   for (;;) {
     // fetch() returns immediately with whatever is committed — a Reader
     // is not a long-poll. For "sit and wait" behavior, use
-    // feeds.temporaryFetch({ tail, waitMs }) or pace empty fetches.
+    // feedOps().temporaryFetch({ tail, waitMs }) or pace empty fetches.
     const page = await reader.fetch(session, 50);
 
     for (const record of page.records) {

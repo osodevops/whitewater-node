@@ -93,13 +93,14 @@ describe("typed Domain facade", () => {
 
   it("lists readers/writers/subscriptions scoped to the Domain", async () => {
     const domain = await seeded();
-    await client.createWriter("orders.ingest", "shop.orders");
-    await client.createReader("fulfillment", "shop.orders");
-    await client.createSubscription("shop.subs.orders", "shop.orders");
-    await client.createWriter("foreign.writer", "other.events");
+    await domain.createWriterFeed("ingest", "orders");
+    await domain.createReaderFeed("fulfillment", "orders");
+    await domain.createSubscription("subs.orders", "orders");
+    const other = client.domain("other");
+    await other.createWriterFeed("writer", "events");
     await domain.refresh();
-    expect(await domain.writers()).toEqual(["orders.ingest"]);
-    expect(await domain.readers()).toEqual(["fulfillment"]);
+    expect(await domain.writers()).toEqual(["shop.ingest"]);
+    expect(await domain.readers()).toEqual(["shop.fulfillment"]);
     expect(await domain.subscriptions()).toEqual(["shop.subs.orders"]);
   });
 
@@ -358,7 +359,7 @@ describe("ReaderBuilder", () => {
       .readerId("r1")
       .readerStartPoint(ReaderStart.END)
       .declare();
-    const described = await client.describeReader("r1");
+    const described = await shop.describeReader("r1");
     expect((described.results[0].data as { start: { kind: string } }).start.kind).toBe(
       "now",
     );

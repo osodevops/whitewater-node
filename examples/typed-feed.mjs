@@ -5,8 +5,9 @@ import { codecs, WhitewaterClient } from "../dist/index.js";
  * once, then append(key, value) encodes and every fetch/records
  * decodes — application code never touches Buffers.
  *
- *   orders.writer("ingest")    — declares the Writer + opens a session
- *   orders.reader("audit", 64) — declares the Reader + opens a session
+ *   demo.createFeed("orders")   — declares demo.orders
+ *   orders.writer("ingest")     — declares the Writer + opens a session
+ *   orders.reader("audit", 64)  — declares the Reader + opens a session
  *   writer.append / reader.fetch / reader.ack
  */
 
@@ -19,11 +20,11 @@ const client = new WhitewaterClient({
   ],
 });
 
-await client.createDomain("demo");
-await client.createFeed("demo.orders");
+const demo = await client.createDomain("demo");
+await demo.createFeed("orders");
 
 // String keys + JSON payloads — the payload codec is the one argument.
-const orders = client.feed("demo.orders", codecs.json());
+const orders = demo.feed("orders", codecs.json());
 
 // Declares "ingest" when missing and opens its epoch-fenced session.
 const writer = await orders.writer("ingest");

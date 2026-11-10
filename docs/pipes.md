@@ -26,9 +26,11 @@ Every Pipe names a **Subscription** — the durable delivery lease it pulls
 input through. Declare one per Pipe:
 
 ```ts
-await client.createSubscription("orders.sub", "ops.orders");
+const ops = await client.createDomain("ops");
+await ops.createSubscription("orders.sub", "orders");
 // ReaderStart.beginning() is the default; ReaderStart.now()/cursor()/timestampNs()
-// select other starts.
+// select other starts. The source Feed may cross Domains — pass its
+// Feed handle or scoped.abs("other.feed").
 ```
 
 A Subscription can cover a whole Domain (typed-command form):
@@ -40,6 +42,8 @@ await client.commands([{
   domain: "ops",
   start: { kind: "beginning" },
 }]);
+// (the domain-sourced form binds every feed in the Domain and stays
+// pinned to it — no cross-Domain source)
 ```
 
 `enrich` and `window` pipes need a **StateStore** (see `docs/stores.md`):
@@ -47,19 +51,19 @@ await client.commands([{
 ```ts
 import { StateStore, Extractor } from "whitewater";
 
-const spec = StateStore.named("ops.customers")
+const spec = StateStore.named("customers")                    // -> ops.customers
   .addKey("email", true, Extractor.json("$.email"))
   .addKey("tier", false, Extractor.json("$.tier"));
-await client.stateStores.define(spec, "ops.customer.changes");
+await ops.defineStateStore(spec, "customer.changes");
 ```
 
 ## 2. Forward pipes
 
 ```ts
-await client.defineForwardPipe(
-  "ops.orders.relay",   // pipe name (dotted)
-  "orders.sub",         // source subscription
-  "ops.orders.relayed", // output feed
+await ops.defineForwardPipe(
+  "orders.relay",       // pipe name -> ops.orders.relay
+  "orders.sub",         // input subscription (same Domain)
+  "orders.relayed",     // output feed — or a Feed handle / scoped.abs
 );
 ```
 
@@ -73,17 +77,17 @@ journal — replayed outputs are byte-identical.
 ```ts
 import { PipeOperation } from "whitewater";
 
-await client.defineEnrichPipe(
-  "ops.orders.enrich",
+await ops.defineEnrichPipe(
+  "orders.enrich",
   "orders.sub",
-  "ops.enriched",
-  "ops.customers",                 // lookup store
+  "enriched",
+  "customers",                     // lookup store — may be Abs()/a Store
   PipeOperation.enrich(Extractor.json("$.customerId"), {
     freshness: "latest",           // or "strict"
     named: "email",                // named key; omit for primary
     onMiss: "quarantine",          // "forward" | "drop" | "quarantine"
   }),
-  "ops.enrich.misses",             // quarantine feed (required for "quarantine")
+  "enrich.misses",                 // quarantine feed (required for "quarantine")
 );
 ```
 
@@ -94,14 +98,14 @@ must carry non-unique named keys `"key"` and `"pane"` so pane rows stay
 enumerable without composite row keys:
 
 ```ts
-await client.stateStores.define(
-  StateStore.named("ops.order.counts").addKey("key").addKey("pane"),
+await ops.defineStateStore(
+  StateStore.named("order.counts").addKey("key").addKey("pane"),
 );
 
-await client.defineWindowPipe(
-  "ops.orders.hourly",
+await ops.defineWindowPipe(
+  "orders.hourly",
   "orders.sub",
-  "ops.order.counts",              // pane store (declared above)
+  "order.counts",                  // pane store — may be Abs()/a Store
   PipeOperation.window(
     Time.h(1),                     // 1h panes
     Extractor.json("$.region"),
@@ -144,14 +148,14 @@ WindowAggregation.average(Extractor.json("$.rtt"))
 ## 5. Lifecycle
 
 ```ts
-const pipe = client.pipe("ops.orders.relay");
+const pipe = ops.pipe("orders.relay");
 
 const info = await pipe.describe(); // stage, operation, outputs, status
 await pipe.pause();   // cooperative; the frontier stays put
 await pipe.resume();  // restarts from the durable frontier
 await pipe.drop();
 
-const all = await client.pipes();
+const all = await ops.pipeInfos();
 ```
 
 `pause` is durable and idempotent — nothing is dropped while paused.

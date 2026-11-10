@@ -28,12 +28,12 @@ describe.skipIf(!LIVE)("live store", () => {
     const run = `n${(Date.now() & 0x7fffffff).toString(36)}`;
     const domain = `smoke.${run}`;
     expect(await client.healthy()).toBe(true);
-    await client.createDomain(domain);
+    const owned = await client.createDomain(domain);
 
     const spec = StateStore.named(`${domain}.employees`)
       .addKey("passport", true)
       .addKey("department", false);
-    const store = await client.stateStores.define(spec);
+    const store = await owned.defineStateStore(spec);
     expect(store.name).toBe(`${domain}.employees`);
 
     await store.put("emp-1", "alice", { passport: "P111", department: "eng" });

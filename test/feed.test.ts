@@ -192,12 +192,12 @@ describe("typed feed facade", () => {
 
     const wcl = bodies("/v1/admin/wcl").map((b) => b.script as string);
     expect(wcl).toEqual([
-      "CREATE WRITER ingest TO orders.events",
-      "OPEN WRITER SESSION ingest",
+      "CREATE WRITER orders.ingest TO orders.events",
+      "OPEN WRITER SESSION orders.ingest",
     ]);
     const appends = bodies("/v1/writers/append");
     expect(appends).toHaveLength(1);
-    expect(appends[0].writer).toBe("ingest");
+    expect(appends[0].writer).toBe("orders.ingest");
     expect(appends[0].session_epoch).toBe(42);
     expect(decodeB64(appends[0].key_base64)).toBe("order-1");
     expect(JSON.parse(decodeB64(appends[0].payload_base64))).toEqual({

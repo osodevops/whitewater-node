@@ -298,6 +298,21 @@ export class Feed<K, V> {
     return bound;
   }
 
+  /** The Domain prefix owning this Feed — the first dotted segment.
+   * Writer/Reader/Subscription names resolve inside it so no
+   * "randomly named" resource escapes the Domain. */
+  private get domainPrefix(): string {
+    return this.name.split(".")[0];
+  }
+
+  /** Resolve a writer/reader/subscription name inside this Feed's
+   * Domain — idempotent for already-qualified names. */
+  private scope(name: string): string {
+    return name.startsWith(this.domainPrefix + ".")
+      ? name
+      : `${this.domainPrefix}.${name}`;
+  }
+
   /** Rebind the same feed under different codecs — no wire call:
    * `feed.view(codecs.utf8(), codecs.bytes())` reads raw. */
   view<K2, V2>(keyCodec: Codec<K2>, valueCodec: Codec<V2>): Feed<K2, V2> {
@@ -340,6 +355,7 @@ export class Feed<K, V> {
    * feed's codecs so `writer.append(key, value)` just works.
    */
   async writer(writerName: string): Promise<FeedWriter<K, V>> {
+    writerName = this.scope(writerName);
     try {
       await this.client.createWriter(writerName, this.name);
     } catch (error) {
@@ -371,6 +387,7 @@ export class Feed<K, V> {
     maxPageSize = 64,
     start: ReaderStart = ReaderStart.beginning(),
   ): Promise<FeedReader<K, V>> {
+    readerName = this.scope(readerName);
     try {
       await this.client.createReader(readerName, this.name, start);
     } catch (error) {
@@ -429,7 +446,7 @@ export class Feed<K, V> {
     onError?: (error: WhitewaterError) => void,
   ): Subscription {
     return this.client.subscribe(
-      reader,
+      this.scope(reader),
       this.name,
       start ?? ReaderStart.beginning(),
       async (records) => {

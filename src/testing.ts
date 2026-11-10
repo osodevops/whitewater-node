@@ -677,7 +677,7 @@ export class FakeRiverbed {
         return {
           name: name ?? "",
           subscription_id: s.id,
-          space_id: this.spaceIdOf(s.feed),
+          space_id: this.spaceIdOf(name ?? ""),
           feed: s.feed,
           start: { kind: s.startKind },
           stage: "declared",
@@ -697,13 +697,10 @@ export class FakeRiverbed {
       }
       case "pipes": {
         const pipe = item as Json;
-        const sub = [...this.subscriptions.values()].find(
-          (s) => s.id === pipe.subscription_id,
-        );
         return {
           ...pipe,
           pipe_id: pipe.pipe_id ?? null,
-          space_id: sub != null ? this.spaceIdOf(sub.feed) : null,
+          space_id: this.spaceIdOf(String(pipe.name ?? "")),
         };
       }
       case "roles": {

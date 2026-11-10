@@ -6,7 +6,7 @@ import { codecs, ReaderStart, WhitewaterClient } from "../dist/index.js";
  *
  *   const shop = await client.getDomain("shop");   // materialized view
  *   const orders = shop.feed("orders");            // typed Feed, zero I/O
- *   const reader = await client.createReader(shop, orders)
+ *   const reader = await shop.createReader(orders)
  *     .readerId("fulfillment")
  *     .readerStartPoint(ReaderStart.BEGINNING)
  *     .open();
@@ -25,26 +25,24 @@ const client = new WhitewaterClient({
   ],
 });
 
-await client.createDomain("shop");
-await client.createFeed("shop.orders");
-await client.createFeed("shop.returns");
-
-// getDomain() verifies + materializes now; domain() is the lazy handle.
-const shop = await client.getDomain("shop");
+// createDomain returns the Domain handle — every resource hangs off it.
+const shop = await client.createDomain("shop");
+await shop.createFeed("orders");
+await shop.createFeed("returns");
 
 console.log("feeds:", await shop.feedNames());
 console.log("order-prefix feeds:", (await shop.feeds("order")).map((f) => f.name));
 
 const orders = shop.feed("orders", codecs.json()); // typed Feed, zero I/O
 
-const writer = await client
-  .createWriter(shop, orders)
-  .writerId("orders.ingest")
+const writer = await shop
+  .createWriter(orders)
+  .writerId("ingest")   // resolves to shop.ingest
   .open();
 await writer.append("order-1", { id: "order-1", total: 42 });
 
-const reader = await client
-  .createReader(shop, orders)
+const reader = await shop
+  .createReader(orders)
   .readerId("fulfillment") // durable id — the Kafka groupId analogue
   .readerStartPoint(ReaderStart.BEGINNING) // first-declare only
   .maxPageSize(256)

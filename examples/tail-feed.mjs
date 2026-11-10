@@ -23,14 +23,15 @@ const client = new WhitewaterClient({
   ],
 });
 
-await client.createDomain("demo");
-await client.createFeed("demo.tail");
+// Everything hangs off the Domain — Feeds are never global.
+const demo = await client.createDomain("demo");
+await demo.createFeed("tail");
 
 let after = /** @type {Cursor | null} */ (null); // null → feed tail position
 
 while (true) {
   // Blocks up to wait_ms server-side; returns early when records land.
-  const page = await client.feeds.temporaryFetch("demo.tail", {
+  const page = await demo.feedOps().temporaryFetch("demo.tail", {
     tail: true,
     waitMs: 2500,
     after,

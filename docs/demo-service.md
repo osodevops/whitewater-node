@@ -16,15 +16,14 @@ const client = new WhitewaterClient({
 });
 
 // ---- provision ------------------------------------------------------
-await client.createDomain("shop");
-const shop = await client.getDomain("shop");
+const shop = await client.createDomain("shop");
 await shop.createFeed("orders");
 await shop.createFeed("orders.dlq");          // dead-letter feed
 
 // ---- produce (usually a different service) ---------------------------
 // Bind codecs on the Feed handle — the SDK serializes, never Buffer.from.
 const orders = shop.feed("orders");   // string payloads — UTF-8 default
-const writer = await shop.createWriter(orders).writerId("orders.ingest").open();
+const writer = await shop.createWriter(orders).writerId("ingest").open();
 await writer.append("order-1", '{"total":42}');
 
 // ---- consume ----------------------------------------------------------

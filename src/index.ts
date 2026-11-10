@@ -12,8 +12,8 @@ export type { AppendInput, WhitewaterClientOptions } from "./clients.js";
 export { codecs, textMetadata } from "./codecs.js";
 export type { Codec } from "./codecs.js";
 export { Feed, FeedReader, FeedWriter } from "./feed.js";
-export { Domain, ReaderBuilder, WriterBuilder } from "./domain.js";
-export type { FeedSchema, SchemaDecl } from "./domain.js";
+export { Domain, ReaderBuilder, scoped, SubscriptionRef, WriterBuilder } from "./domain.js";
+export type { FeedSchema, SchemaDecl, Scoped, ScopedRef } from "./domain.js";
 export { FeedConsumer } from "./consumer.js";
 export type {
   FeedEvent,

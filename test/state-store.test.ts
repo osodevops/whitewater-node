@@ -89,8 +89,8 @@ describe("state store facade", () => {
 
   it("define sends the typed command with declared named keys", async () => {
     const spec = StateStore.named("accounts.employees")
-      .addKey("passport", true)
-      .addKey("department", false);
+      .addUniqueKey("passport")
+      .addNonUniqueKey("department");
     const store = await client.stateStores.define(spec);
 
     expect(store.name).toBe("accounts.employees");
@@ -106,26 +106,39 @@ describe("state store facade", () => {
 
   it("bounds named keys at MAX_NAMED_KEYS and rejects duplicates", () => {
     const spec = StateStore.named("accounts.ten");
-    for (let i = 0; i < 10; i++) spec.addKey(`k${i}`);
-    expect(() => spec.addKey("k10")).toThrow("at most 10 named keys");
-    expect(() => StateStore.named("accounts.d").addKey("a").addKey("a")).toThrow("duplicate");
+    for (let i = 0; i < 10; i++) spec.addNonUniqueKey(`k${i}`);
+    expect(() => spec.addNonUniqueKey("k10")).toThrow("at most 10 named keys");
+    expect(() => StateStore.named("accounts.d").addNonUniqueKey("a").addNonUniqueKey("a")).toThrow("duplicate");  });
+
+  it("addUniqueKey/addNonUniqueKey set the flag and carry extractors", () => {
+    const spec = StateStore.named("accounts.flags")
+      .addUniqueKey("passport")
+      .addNonUniqueKey("department");
+    expect(spec.namedKeys[0].unique).toBe(true);
+    expect(spec.namedKeys[1].unique).toBe(false);
+    const feedSourced = StateStore.named("accounts.fs")
+      .addUniqueKey("pp", Extractor.metadata("pp"))
+      .addNonUniqueKey("dept", Extractor.json("dept"));
+    expect(feedSourced.namedKeys[0].unique).toBe(true);
+    expect(feedSourced.namedKeys[0].extractor).toBeTruthy();
+    expect(feedSourced.namedKeys[1].unique).toBe(false);
   });
 
   it("define feed-sourced named keys need extractors", async () => {
     // A feed-sourced named key without a projection is a declaration bug.
-    const bare = StateStore.named("accounts.src").addKey("k");
+    const bare = StateStore.named("accounts.src").addNonUniqueKey("k");
     await expect(client.stateStores.define(bare, "accounts.events")).rejects.toThrow(
       "require an extractor",
     );
     // An extractor on a manual store is refused — puts carry the values.
-    const manual = StateStore.named("accounts.m").addKey("k", false, Extractor.metadata("pp"));
+    const manual = StateStore.named("accounts.m").addNonUniqueKey("k", Extractor.metadata("pp"));
     await expect(client.stateStores.define(manual)).rejects.toThrow("manual stores");
   });
 
   it("define feed-sourced emits extractors in the typed command", async () => {
     const spec = StateStore.named("accounts.tagged")
-      .addKey("passport", true, Extractor.metadata("pp"))
-      .addKey("department", false, Extractor.json("dept"));
+      .addUniqueKey("passport", Extractor.metadata("pp"))
+      .addNonUniqueKey("department", Extractor.json("dept"));
     await client.stateStores.define(spec, "accounts.events");
 
     const sent = bodies("/v1/admin/commands")[0].commands[0];

@@ -203,9 +203,11 @@ DLQ, idempotent outputs, counters — is
 ```ts
 const accounts = await client.createDomain("accounts");
 const spec = StateStore.named("employees")                          // -> accounts.employees
-  .addKey("passport", true).addKey("department", false);           // up to 10 named keys
+  .addUniqueKey("passport").addNonUniqueKey("department");           // up to 10 named keys
 const store = await accounts.defineStateStore(spec);               // durable store on the Nodes
 
+// named-key postings: a typed StoreKeySet, a builder callback, or a plain record —
+await store.put("emp-1", payload, PassportKeySet.with("P123", "eng"));
 await store.put("emp-1", payload, { passport: "P123", department: "eng" });
 const row = await store.get("emp-1");              // StoreRow | null + freshness
 const rows = await store.getBy("passport", "P123"); // named key — non-unique, a list

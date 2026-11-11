@@ -1022,7 +1022,7 @@ export class WhitewaterClient {
  * ```ts
  * const accounts = await client.createDomain("accounts");
  * const spec = StateStore.named("employees")
- *   .addKey("passport", true).addKey("department", false);
+ *   .addUniqueKey("passport").addNonUniqueKey("department");
  * const store = await accounts.defineStateStore(spec);
  *
  * await store.put(Buffer.from("user-1"), Buffer.from("profile-1"),
@@ -1083,6 +1083,18 @@ export class StateStore {
     }
     this.declaredKeys.push({ name: namedKey, unique, extractor });
     return this;
+  }
+
+  /** Declare a **unique** named key — one value resolves to at most one
+   * primary row (`addKey(namedKey, true, extractor)`). */
+  addUniqueKey(namedKey: string, extractor?: StoreExtractor): this {
+    return this.addKey(namedKey, true, extractor);
+  }
+
+  /** Declare a **non-unique** named key — one value lists every matching
+   * primary row (`addKey(namedKey, false, extractor)`). */
+  addNonUniqueKey(namedKey: string, extractor?: StoreExtractor): this {
+    return this.addKey(namedKey, false, extractor);
   }
 
   get namedKeys(): NamedKey[] {

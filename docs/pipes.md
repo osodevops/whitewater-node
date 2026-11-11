@@ -52,8 +52,8 @@ await client.commands([{
 import { StateStore, Extractor } from "whitewater";
 
 const spec = StateStore.named("customers")                    // -> ops.customers
-  .addKey("email", true, Extractor.json("$.email"))
-  .addKey("tier", false, Extractor.json("$.tier"));
+  .addUniqueKey("email", Extractor.json("$.email"))
+  .addNonUniqueKey("tier", Extractor.json("$.tier"));
 await ops.defineStateStore(spec, "customer.changes");
 ```
 
@@ -99,7 +99,7 @@ enumerable without composite row keys:
 
 ```ts
 await ops.defineStateStore(
-  StateStore.named("order.counts").addKey("key").addKey("pane"),
+  StateStore.named("order.counts").addNonUniqueKey("key").addNonUniqueKey("pane"),
 );
 
 await ops.defineWindowPipe(

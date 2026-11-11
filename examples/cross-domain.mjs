@@ -49,7 +49,7 @@ const orders = purchasing.feed("orders");
 await warehouse.createFeed("orders.inbound");
 await warehouse.createFeed("orders.misses");
 await warehouse.defineStateStore(
-  StateStore.named("profiles").addKey("email", true, Extractor.json("email")),
+  StateStore.named("profiles").addUniqueKey("email", Extractor.json("email")),
 );
 
 // The Subscription belongs to warehouse — that is where its durable

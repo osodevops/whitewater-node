@@ -217,7 +217,7 @@ describe("typed store facade", () => {
 
   it("StoreKeySet supports all inline styles and single-string fallback", async () => {
     const accounts = client.domain("accounts");
-    const spec = StateStore.named("employees").addKey("passport", true).addKey("department");
+    const spec = StateStore.named("employees").addUniqueKey("passport").addNonUniqueKey("department");
     await accounts.defineStateStore(spec);
     const profiles = accounts.store("employees", codecs.json<Profile>());
 

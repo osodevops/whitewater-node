@@ -127,7 +127,7 @@ describe("FakeRiverbed unit-test double", () => {
   });
 
   it("round-trips a state store: put/get/getBy/iterate/delete/clear", async () => {
-    const spec = StateStore.named("accounts.employees").addKey("department", false);
+    const spec = StateStore.named("accounts.employees").addNonUniqueKey("department");
     const store = await client.stateStores.define(spec);
     await store.put("user-1", "profile-1", { department: "eng" });
     await store.put("user-2", "profile-2", { department: "ops" });

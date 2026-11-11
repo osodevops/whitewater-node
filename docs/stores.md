@@ -8,15 +8,15 @@ projection, and every operation is an HTTP call with freshness evidence.
 ```ts
 const accounts = await client.createDomain("accounts");
 const spec = StateStore.named("employees")              // -> accounts.employees
-  .addKey("passport", true)             // unique: one row per value
-  .addKey("department", false);         // non-unique: value -> many rows
+  .addUniqueKey("passport")             // unique: one row per value
+  .addNonUniqueKey("department");         // non-unique: value -> many rows
 
 const store = await accounts.defineStateStore(spec);   // manual store
 // or a bound facade for an already-declared store:
 const same = accounts.stateStore("employees");
 ```
 
-`addKey` records declaration intent used by `define` — named keys are
+`addUniqueKey`/`addNonUniqueKey` record declaration intent used by `define` — named keys are
 declared at creation; at most `StateStore.MAX_NAMED_KEYS` (10). Adding a
 key to an existing store has no effect server-side.
 
@@ -142,8 +142,8 @@ an `Extractor`:
 
 ```ts
 const spec = StateStore.named("tagged")
-  .addKey("passport", true, Extractor.metadata("pp"))
-  .addKey("department", false, Extractor.json("dept"));
+  .addUniqueKey("passport", Extractor.metadata("pp"))
+  .addNonUniqueKey("department", Extractor.json("dept"));
 const store = await accounts.defineStateStore(spec, "events");
 ```
 
@@ -188,7 +188,7 @@ await client.commands([
 
 | Where | Type | Meaning / remedy |
 |---|---|---|
-| `addKey` #11 / duplicate / blank | `Error` | Declaration contract (10-key bound, distinct names). |
+| `addUniqueKey`/`addNonUniqueKey`/`addKey` #11 / duplicate / blank | `Error` | Declaration contract (10-key bound, distinct names). |
 | `define` spec + `source` + bare named keys | `Error` | Feed-sourced keys need an `Extractor` — checked before the call. |
 | `define` manual spec + `Extractor` | `Error` | Extractors apply to feed-sourced stores only. |
 | Data op on unbound spec | `Error` | `StateStore.named` builds a spec; bind via `domain.defineStateStore` or `domain.stateStore(name)`. |

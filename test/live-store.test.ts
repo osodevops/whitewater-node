@@ -31,8 +31,8 @@ describe.skipIf(!LIVE)("live store", () => {
     const owned = await client.createDomain(domain);
 
     const spec = StateStore.named(`${domain}.employees`)
-      .addKey("passport", true)
-      .addKey("department", false);
+      .addUniqueKey("passport")
+      .addNonUniqueKey("department");
     const store = await owned.defineStateStore(spec);
     expect(store.name).toBe(`${domain}.employees`);
 

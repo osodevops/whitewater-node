@@ -58,7 +58,7 @@ await pipes.defineStateStore(StateStore.named("profiles"));
 // and requires non-unique named keys "key" and "pane" so the view is
 // enumerable without knowing composite row keys.
 await pipes.defineStateStore(
-  StateStore.named("panes").addKey("key").addKey("pane"),
+  StateStore.named("panes").addNonUniqueKey("key").addNonUniqueKey("pane"),
 );
 
 // Subscriptions are Domain-scoped — one per Pipe, all sourcing pipes.in.

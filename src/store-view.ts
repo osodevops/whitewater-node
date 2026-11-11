@@ -134,7 +134,7 @@ export interface RowPage<K, V> {
  * data operations, not declaration:
  *
  * ```ts
- * const spec = StateStore.named("accounts.employees").addKey("passport", true);
+ * const spec = StateStore.named("accounts.employees").addUniqueKey("passport");
  * const bound = await client.stateStores.define(spec);
  * const profiles = Store.bind(bound, codecs.utf8(), codecs.json<Profile>());
  * ```

@@ -80,6 +80,14 @@ const WIRE_ENDPOINTS: Record<string, [string, string]> = {
 
 const TRANSIENT_ATTEMPTS = 120;
 const TRANSIENT_INTERVAL_MS = 500;
+// Wall-clock bound on the transient budget: 120 attempts was meant as a
+// ~one-minute window, but an unavailable endpoint can burn a whole
+// transport timeout per attempt — cap elapsed time so a dead Riverbed
+// fails instead of grinding for hours.
+const TRANSIENT_BUDGET_MS = 120_000;
+// The chaos driver's own internal waits are bounded to a few minutes;
+// give it headroom but never let a wedged hook stall the gate.
+const CHAOS_TIMEOUT_MS = 420_000;
 
 class TransportError extends Error {}
 
@@ -383,7 +391,7 @@ class Runner {
     let action = op;
     for (const key of Object.keys(rendered).sort()) action += " " + String(rendered[key]);
     try {
-      execSync(`${this.chaosCmd} ${action}`, { stdio: "pipe" });
+      execSync(`${this.chaosCmd} ${action}`, { stdio: "pipe", timeout: CHAOS_TIMEOUT_MS });
     } catch (error) {
       throw new Error(`chaos hook failed: ${(error as Error).message}`);
     }
@@ -525,6 +533,7 @@ class Runner {
 
       let attempt = 0;
       let transient = 0;
+      const transientDeadline = Date.now() + TRANSIENT_BUDGET_MS;
       let status = 0;
       let body: unknown = null;
       for (;;) {
@@ -532,14 +541,14 @@ class Runner {
         try {
           ({ status, body } = await this.dispatch(op, args));
         } catch (error) {
-          if (error instanceof TransportError && transient < TRANSIENT_ATTEMPTS) {
+          if (error instanceof TransportError && transient < TRANSIENT_ATTEMPTS && Date.now() < transientDeadline) {
             transient += 1;
             await new Promise((resolve) => setTimeout(resolve, TRANSIENT_INTERVAL_MS));
             continue;
           }
           throw new Error(`step ${index} (${op}): ${(error as Error).message}`);
         }
-        if (status >= 500 && transient < TRANSIENT_ATTEMPTS) {
+        if (status >= 500 && transient < TRANSIENT_ATTEMPTS && Date.now() < transientDeadline) {
           transient += 1;
           await new Promise((resolve) => setTimeout(resolve, TRANSIENT_INTERVAL_MS));
           continue;

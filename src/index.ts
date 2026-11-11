@@ -21,8 +21,13 @@ export type {
   FeedPage,
   FeedReaderPage,
 } from "./feed.js";
-export { Store } from "./store-view.js";
-export type { Row, RowPage, RowsResult } from "./store-view.js";
+export {
+  AbstractStoreKeySet,
+  GenericStoreKeySet,
+  Store,
+  StoreKeySet,
+} from "./store-view.js";
+export type { NamedKeysInput, Row, RowPage, RowsResult } from "./store-view.js";
 export {
   decodePipes,
   demandCounter,

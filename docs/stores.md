@@ -20,9 +20,47 @@ const same = accounts.stateStore("employees");
 declared at creation; at most `StateStore.MAX_NAMED_KEYS` (10). Adding a
 key to an existing store has no effect server-side.
 
-## Writing
+## Writing & `AbstractStoreKeySet`
+
+Define a typed `AbstractStoreKeySet` subclass once for your store's secondary keys so every `put` is strongly typed, or use inline builders / records:
 
 ```ts
+export class PassportKeySet extends AbstractStoreKeySet {
+  setPassport(v: string): this { return this.put("passport", v); }
+  setDepartment(v: string): this { return this.put("department", v); }
+  passport(v: string): this { return this.setPassport(v); }
+  department(v: string): this { return this.setDepartment(v); }
+
+  static with(passport: string, department: string): PassportKeySet {
+    return new PassportKeySet().setPassport(passport).setDepartment(department);
+  }
+  static withPassport(passport: string): PassportKeySet {
+    return new PassportKeySet().setPassport(passport);
+  }
+  static of(builder: (k: PassportKeySet) => void): PassportKeySet {
+    const ks = new PassportKeySet();
+    builder(ks);
+    return ks;
+  }
+}
+
+// 1A. Static factory one-liner:
+await store.put("emp-1", profile, PassportKeySet.with("P123", "eng"));
+
+// 1B. Static starter + fluent chaining:
+await store.put("emp-1", profile, PassportKeySet.withPassport("P123").department("eng"));
+
+// 2A. Lambda on the KeySet class:
+await store.put("emp-1", profile, PassportKeySet.of((k) => k.passport("P123").department("eng")));
+
+// 2B. Bind the KeySet class onto the store so `k` is typed automatically:
+const keyed = profiles.withKeySet(PassportKeySet);
+await keyed.put("emp-1", profile, (k) => k.passport("P123").department("eng"));
+
+// 3. Single default string fallback (maps to the store's first declared key):
+await store.put("emp-1", profile, profile.passport);
+
+// Plain record is still supported for dynamic keys:
 await store.put("user-1", "profile-1", {
   passport: "P111",
   department: "eng",

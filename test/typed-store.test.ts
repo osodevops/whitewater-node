@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import * as http from "node:http";
 import { AddressInfo } from "node:net";
-import { codecs, Store, WhitewaterClient } from "../src/index.js";
+import { AbstractStoreKeySet, codecs, StateStore, Store, StoreKeySet, WhitewaterClient } from "../src/index.js";
 
 interface Profile {
   id: string;
@@ -30,6 +30,17 @@ describe("typed store facade", () => {
 
   const route = (path: string): [number, unknown] => {
     switch (path) {
+      case "/v1/admin/commands":
+        return [
+          200,
+          {
+            request_id: "00000000-0000-7000-8000-000000000006",
+            revision: 9,
+            authority: "control_plane",
+            warning: null,
+            results: [{ statement: "s", message: "ok", data: {} }],
+          },
+        ];
       case "/v1/state-stores/mutate":
       case "/v1/state-stores/clear":
         return [200, MUTATE_OK];
@@ -169,5 +180,70 @@ describe("typed store facade", () => {
     expect(found?.value.name).toBe("Ada");
     expect(profiles.raw()).toBe(bound);
     expect(profiles.name).toBe("accounts.employees");
+  });
+
+  class PassportKeySet extends AbstractStoreKeySet {
+    setPassport(v: string): this {
+      return this.put("passport", v);
+    }
+    setDepartment(v: string): this {
+      return this.put("department", v);
+    }
+    passport(v: string): this {
+      return this.setPassport(v);
+    }
+    department(v: string): this {
+      return this.setDepartment(v);
+    }
+    static with(passport: string, department: string): PassportKeySet {
+      return new PassportKeySet().setPassport(passport).setDepartment(department);
+    }
+    static withPassport(passport: string): PassportKeySet {
+      return new PassportKeySet().setPassport(passport);
+    }
+    static of(builder: (k: PassportKeySet) => void): PassportKeySet {
+      const ks = new PassportKeySet();
+      builder(ks);
+      return ks;
+    }
+  }
+
+  const lastNamed = () => {
+    const ops = bodies("/v1/state-stores/mutate").map((b) => b.op as Record<string, unknown>);
+    const last = ops[ops.length - 1];
+    const entries = (last.named as { name: string; values: { value: unknown }[] }[]) ?? [];
+    return Object.fromEntries(entries.map((e) => [e.name, e.values[0]?.value]));
+  };
+
+  it("StoreKeySet supports all inline styles and single-string fallback", async () => {
+    const accounts = client.domain("accounts");
+    const spec = StateStore.named("employees").addKey("passport", true).addKey("department");
+    await accounts.defineStateStore(spec);
+    const profiles = accounts.store("employees", codecs.json<Profile>());
+
+    // 1A: Static factory PassportKeySet.with("P123", "eng")
+    await profiles.put("emp-1", { id: "emp-1", name: "Ada" }, PassportKeySet.with("P123", "eng"));
+    expect(lastNamed()).toEqual({ passport: "P123", department: "eng" });
+
+    // 1B: Static starter + fluent chaining
+    await profiles.put("emp-2", { id: "emp-2", name: "Bob" }, PassportKeySet.withPassport("P222").department("ops"));
+    expect(lastNamed()).toEqual({ passport: "P222", department: "ops" });
+
+    // 2A: Lambda on KeySet class
+    await profiles.put("emp-3", { id: "emp-3", name: "Cara" }, PassportKeySet.of((k) => k.passport("P333").department("eng")));
+    expect(lastNamed()).toEqual({ passport: "P333", department: "eng" });
+
+    // 2B: Store typed with KeySet class via withKeySet
+    const keyed = profiles.withKeySet(PassportKeySet);
+    await keyed.put("emp-4", { id: "emp-4", name: "Dan" }, (k) => k.passport("P444").department("sales"));
+    expect(lastNamed()).toEqual({ passport: "P444", department: "sales" });
+
+    // 3: Single default string fallback -> maps to first declared key ("passport")
+    await profiles.put("emp-5", { id: "emp-5", name: "Eve" }, "P555");
+    expect(lastNamed()).toEqual({ passport: "P555" });
+
+    // StoreKeySet.of static helper
+    await profiles.put("emp-6", { id: "emp-6", name: "Frank" }, StoreKeySet.of("passport", "P666", "department", "qa"));
+    expect(lastNamed()).toEqual({ passport: "P666", department: "qa" });
   });
 });

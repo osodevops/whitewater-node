@@ -23,7 +23,7 @@ import {
   type IndexPredicate,
   type PipeInfo,
 } from "./operations.js";
-import { Store } from "./store-view.js";
+import { GenericStoreKeySet, isStoreKeySet, Store, StoreKeySet } from "./store-view.js";
 import { MAX_NAMED_KEYS } from "./models.js";
 import type {
   AppendBatchResult,
@@ -1042,8 +1042,17 @@ export class WhitewaterClient {
 export class StateStore {
   /** Named secondary keys per store; matches the server declaration budget. */
   static readonly MAX_NAMED_KEYS = MAX_NAMED_KEYS;
+  private static readonly declaredDefaultKeys = new Map<string, string>();
+
+  /** @internal */
+  static registerDefaultKey(storeName: string, defaultKey: string): void {
+    if (storeName && defaultKey && defaultKey.trim()) {
+      StateStore.declaredDefaultKeys.set(dotted(storeName), defaultKey);
+    }
+  }
 
   private readonly declaredKeys: NamedKey[] = [];
+  private defaultKeyName?: string;
 
   private constructor(
     private transport: Transport | null,
@@ -1096,20 +1105,54 @@ export class StateStore {
     return this;
   }
 
-  /** Insert or replace one row. `named` maps a declared named key to a
-   * typed value (or an array for multi-component postings). */
+  /** Bind the default secondary-key name used when a single `string` is passed to {@link put}. */
+  withDefaultKey(defaultKeyName: string): this {
+    if (!defaultKeyName || !defaultKeyName.trim()) {
+      throw new Error("defaultKeyName must not be blank");
+    }
+    this.defaultKeyName = defaultKeyName;
+    return this;
+  }
+
+  private resolveDefaultKeyName(): string {
+    return (
+      this.defaultKeyName ??
+      (this.declaredKeys.length > 0 ? this.declaredKeys[0].name : undefined) ??
+      StateStore.declaredDefaultKeys.get(this.name) ??
+      "default"
+    );
+  }
+
+  /** Insert or replace one row. `named` accepts a {@link StoreKeySet}, a
+   * builder callback, a single `string` default key, or a raw record. */
   async put(
     key: Buffer | string,
     payload: Buffer | string,
-    named?: Record<string, StoreValue | StoreValue[]>,
+    named?:
+      | Record<string, StoreValue | StoreValue[]>
+      | StoreKeySet
+      | ((k: GenericStoreKeySet) => void)
+      | string,
     mutationId = randomUUID(),
   ): Promise<MutationResult> {
+    let record: Record<string, StoreValue | StoreValue[]> | undefined;
+    if (typeof named === "function") {
+      const ks = new GenericStoreKeySet();
+      named(ks);
+      record = ks.toRecord();
+    } else if (typeof named === "string") {
+      record = { [this.resolveDefaultKeyName()]: named };
+    } else if (isStoreKeySet(named)) {
+      record = named.toRecord();
+    } else {
+      record = named;
+    }
     const op: Record<string, unknown> = {
       kind: "put_row",
       key_base64: keyBytes(key).toString("base64"),
       payload_base64: keyBytes(payload).toString("base64"),
     };
-    if (named && Object.keys(named).length > 0) op.named = wire.namedValues(named);
+    if (record && Object.keys(record).length > 0) op.named = wire.namedValues(record);
     return wire.mutationResult(
       await this.boundTransport().post("/v1/state-stores/mutate", {
         store: this.name,
@@ -1267,6 +1310,9 @@ export class StateStoresClient {
         },
       ],
     });
+    if (spec.namedKeys.length > 0) {
+      StateStore.registerDefaultKey(spec.name, spec.namedKeys[0].name);
+    }
     return spec.bind(this.transport);
   }
 

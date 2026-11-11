@@ -11,6 +11,86 @@ import type {
 } from "./models.js";
 import type { StateStore } from "./clients.js";
 
+export interface StoreKeySet {
+  toRecord(): Record<string, StoreValue | StoreValue[]>;
+  toMap?(): Record<string, StoreValue | StoreValue[]>;
+}
+
+export abstract class AbstractStoreKeySet implements StoreKeySet {
+  private readonly keys: Record<string, StoreValue | StoreValue[]> = {};
+
+  put(name: string, value: StoreValue | StoreValue[]): this {
+    if (!name || !name.trim()) {
+      throw new Error("secondary key name must not be blank");
+    }
+    this.keys[name] = value;
+    return this;
+  }
+
+  get(name: string): StoreValue | StoreValue[] | undefined {
+    return this.keys[name];
+  }
+
+  get isEmpty(): boolean {
+    return Object.keys(this.keys).length === 0;
+  }
+
+  toRecord(): Record<string, StoreValue | StoreValue[]> {
+    return { ...this.keys };
+  }
+
+  toMap(): Record<string, StoreValue | StoreValue[]> {
+    return this.toRecord();
+  }
+}
+
+export class GenericStoreKeySet extends AbstractStoreKeySet {}
+
+export type NamedKeysInput<KS extends StoreKeySet = GenericStoreKeySet> =
+  | Record<string, StoreValue | StoreValue[]>
+  | StoreKeySet
+  | ((k: KS) => void)
+  | string;
+
+export function isStoreKeySet(value: unknown): value is StoreKeySet {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as StoreKeySet).toRecord === "function"
+  );
+}
+
+export const StoreKeySet = {
+  of(
+    keyOrBuilder:
+      | string
+      | Record<string, StoreValue | StoreValue[]>
+      | ((k: GenericStoreKeySet) => void),
+    value?: StoreValue | StoreValue[],
+    k2?: string,
+    v2?: StoreValue | StoreValue[],
+    k3?: string,
+    v3?: StoreValue | StoreValue[],
+  ): StoreKeySet {
+    const ks = new GenericStoreKeySet();
+    if (typeof keyOrBuilder === "function") {
+      keyOrBuilder(ks);
+      return ks;
+    }
+    if (typeof keyOrBuilder === "string") {
+      ks.put(keyOrBuilder, value ?? null);
+      if (k2 !== undefined) ks.put(k2, v2 ?? null);
+      if (k3 !== undefined) ks.put(k3, v3 ?? null);
+      return ks;
+    }
+    for (const [k, v] of Object.entries(keyOrBuilder)) {
+      ks.put(k, v);
+    }
+    return ks;
+  },
+};
+
+
 /** One StateStore row with key and payload decoded through the bound
  * codecs — the {@link StoreRow} fields carry through; only the values
  * are typed. */
@@ -59,13 +139,14 @@ export interface RowPage<K, V> {
  * const profiles = Store.bind(bound, codecs.utf8(), codecs.json<Profile>());
  * ```
  */
-export class Store<K, V> {
+export class Store<K, V, KS extends StoreKeySet = GenericStoreKeySet> {
   /** @internal — bind via {@link WhitewaterClient.store} or
    * {@link Store.bind}. */
   constructor(
     private readonly store: StateStore,
     private readonly keyCodec: Codec<K>,
     private readonly valueCodec: Codec<V>,
+    private readonly keySetFactory: () => KS = () => new GenericStoreKeySet() as unknown as KS,
   ) {}
 
   /** Rebind an already-bound byte-level StateStore under typed codecs. */
@@ -89,23 +170,43 @@ export class Store<K, V> {
 
   /** Rebind the same store under different codecs — no wire call:
    * `store.view(codecs.utf8(), codecs.bytes())` reads raw. */
-  view<K2, V2>(keyCodec: Codec<K2>, valueCodec: Codec<V2>): Store<K2, V2> {
-    return new Store<K2, V2>(this.store, keyCodec, valueCodec);
+  withDefaultKey(defaultKeyName: string): this {
+    this.store.withDefaultKey(defaultKeyName);
+    return this;
   }
 
-  /** Insert or replace one row, encoding key and payload through the
-   * bound codecs. `named` maps declared named keys to typed scalar
-   * values; a stable `mutationId` makes retries idempotent. */
+  withKeySet<KS2 extends StoreKeySet>(
+    ctorOrFactory: (new () => KS2) | (() => KS2),
+  ): Store<K, V, KS2> {
+    const factory =
+      typeof ctorOrFactory === "function" && ctorOrFactory.prototype
+        ? () => new (ctorOrFactory as new () => KS2)()
+        : (ctorOrFactory as () => KS2);
+    return new Store<K, V, KS2>(this.store, this.keyCodec, this.valueCodec, factory);
+  }
+
+  view<K2, V2>(keyCodec: Codec<K2>, valueCodec: Codec<V2>): Store<K2, V2, KS> {
+    return new Store<K2, V2, KS>(this.store, keyCodec, valueCodec, this.keySetFactory);
+  }
+
   put(
     key: K,
     value: V,
-    named?: Record<string, StoreValue | StoreValue[]>,
+    named?: NamedKeysInput<KS>,
     mutationId = randomUUID(),
   ): Promise<MutationResult> {
+    let resolved: Record<string, StoreValue | StoreValue[]> | StoreKeySet | string | undefined;
+    if (typeof named === "function") {
+      const ks = this.keySetFactory();
+      named(ks);
+      resolved = ks.toRecord();
+    } else {
+      resolved = named;
+    }
     return this.store.put(
       this.keyCodec.encode(key),
       this.valueCodec.encode(value),
-      named,
+      resolved,
       mutationId,
     );
   }

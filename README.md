@@ -37,7 +37,7 @@ const client = new WhitewaterClient({
 | `domain.queryIndex` | Replicated Index queries — exact/prefix/range predicates |
 | `domain.describeFeed`/`describeWriter`/`describeReader`/`describeSubscription`, `rename*`, `drop*`, `setFeedSchema`/`clearFeedSchema`, `openWriterSession`, `seekReader` | Resource lifecycle — every name resolves inside the Domain |
 
-## Typed feeds and stores — codecs do the serialization
+### Typed feeds and stores — codecs do the serialization
 
 Bind a feed or store to codecs once; application code then works in its
 own types — never manual `Buffer.from`/`JSON.parse` on every call:
@@ -84,7 +84,38 @@ without a wire call. The byte-level `domain.feedOps()`,
 `domain.writer`, `domain.reader`, and `domain.stateStore` facades
 remain for raw access.
 
-### Typed Domains — navigate, don't concatenate
+### Wire-level API
+
+```ts
+const accounts = await client.createDomain("accounts");
+const spec = StateStore.named("employees")                          // -> accounts.employees
+  .addUniqueKey("passport").addNonUniqueKey("department");           // up to 10 named keys
+const store = await accounts.defineStateStore(spec);               // durable store on the Nodes
+
+// named-key postings: a typed StoreKeySet, a builder callback, or a plain record —
+await store.put("emp-1", payload, PassportKeySet.with("P123", "eng"));
+await store.put("emp-1", payload, { passport: "P123", department: "eng" });
+const row = await store.get("emp-1");              // StoreRow | null + freshness
+const rows = await store.getBy("passport", "P123"); // named key — non-unique, a list
+for await (const r of store.iterate()) export(r);
+```
+
+The store lives on the Nodes — the SDK holds no local copy. See
+[docs/stores.md](docs/stores.md) for the full store guide and
+[docs/pipes.md](docs/pipes.md) for managed stream jobs
+(forward/enrich/window) built on subscriptions and stores.
+
+Errors surface as `WhitewaterError` subtypes mapped from wire `code`
+values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,
+`writer.stale_sequence`, ...). `Unavailable` covers transient refusals;
+`AmbiguousResult` marks operations that may have committed — retry
+through the same `requestId`, never blindly re-issue.
+
+Cursors are branded opaque strings: never parsed, ordered, or
+fabricated. `eventTimeNs`/`ingestTimeNs` are `bigint` — the full signed
+64-bit nanosecond range round-trips exactly.
+
+## Typed Domains — navigate, don't concatenate
 
 A Domain owns every Feed it prefixes (`shop` owns `shop.orders`), so the
 friendliest surface navigates domain → feed → reader/writer instead
@@ -156,7 +187,7 @@ await shop.clearFeedSchema("orders");    // reverts to inheritance
 assignments. Formats today: `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`,
 or `custom.<name>` — compatibility enforcement is still a no-op.
 
-### Permanent consumers — the Kafka loop without the plumbing
+## Permanent consumers — the Kafka loop without the plumbing
 
 `feed.consumer(name)` binds the durable named Reader (the
 consumer-group equivalent) and owns the fetch → deliver → ack cycle:
@@ -197,37 +228,6 @@ const count = await counters.getOrDefault(bucket, 0);
 A complete enrichment service — durable consumer, named-key fallback,
 DLQ, idempotent outputs, counters — is
 [examples/enrich-users.mjs](examples/enrich-users.mjs).
-
-## Wire-level API
-
-```ts
-const accounts = await client.createDomain("accounts");
-const spec = StateStore.named("employees")                          // -> accounts.employees
-  .addUniqueKey("passport").addNonUniqueKey("department");           // up to 10 named keys
-const store = await accounts.defineStateStore(spec);               // durable store on the Nodes
-
-// named-key postings: a typed StoreKeySet, a builder callback, or a plain record —
-await store.put("emp-1", payload, PassportKeySet.with("P123", "eng"));
-await store.put("emp-1", payload, { passport: "P123", department: "eng" });
-const row = await store.get("emp-1");              // StoreRow | null + freshness
-const rows = await store.getBy("passport", "P123"); // named key — non-unique, a list
-for await (const r of store.iterate()) export(r);
-```
-
-The store lives on the Nodes — the SDK holds no local copy. See
-[docs/stores.md](docs/stores.md) for the full store guide and
-[docs/pipes.md](docs/pipes.md) for managed stream jobs
-(forward/enrich/window) built on subscriptions and stores.
-
-Errors surface as `WhitewaterError` subtypes mapped from wire `code`
-values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,
-`writer.stale_sequence`, ...). `Unavailable` covers transient refusals;
-`AmbiguousResult` marks operations that may have committed — retry
-through the same `requestId`, never blindly re-issue.
-
-Cursors are branded opaque strings: never parsed, ordered, or
-fabricated. `eventTimeNs`/`ingestTimeNs` are `bigint` — the full signed
-64-bit nanosecond range round-trips exactly.
 
 ## Pipes, indexes, and operations
 

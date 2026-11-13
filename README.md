@@ -1,6 +1,6 @@
 # whitewater-node
 
-Node.js/TypeScript SDK for Whitewater Riverbeds. Implements the versioned
+Node.js/TypeScript SDK for Whitewater. Implements the versioned
 `whitewater-protocol` wire contract defined in the main repository under
 `sdk/spec/` (`PROTOCOL.md`, `endpoints.json`, `conformance/`).
 

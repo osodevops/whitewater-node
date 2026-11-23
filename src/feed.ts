@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Codec } from "./codecs.js";
-import { WhitewaterError } from "./errors.js";
+import {
+  AmbiguousResult,
+  StaleSession,
+  Unavailable,
+  WhitewaterError,
+} from "./errors.js";
 import type {
   AppendBatchResult,
   AppendResult,
@@ -106,11 +111,46 @@ function decodeMessages<K, V>(
  * await writer.appendEvent({ requestId: rid, key: "k", value: order });
  * ```
  */
+/** Per-write delivery callback: `(result, error)` once the commit
+ * lands — mirrors the Java `write(..., BiConsumer)` form. */
+export type WriteCallback<V> = (
+  result: AppendResult | null,
+  error: unknown,
+) => void;
+
+interface PendingWrite {
+  input: {
+    requestId?: string;
+    key: Buffer | null;
+    payload: Buffer;
+    eventTimeNs: bigint | null;
+    metadata?: Record<string, Buffer>;
+  };
+  resolve: (result: AppendResult) => void;
+  reject: (error: unknown) => void;
+  callback?: WriteCallback<unknown>;
+}
+
+const DEFAULT_LINGER_MS = 5;
+const DEFAULT_MAX_BATCH_RECORDS = 256;
+const WRITE_MAX_ATTEMPTS = 3;
+const WRITE_RETRY_BACKOFF_MS = 100;
+
 export class FeedWriter<K, V> {
+  private writeQueue: PendingWrite[] = [];
+  private flushTimer: NodeJS.Timeout | null = null;
+  private flushPromise: Promise<void> | null = null;
+  private closed = false;
+
   constructor(
-    private readonly session: WriterSessionClient,
+    private session: WriterSessionClient,
     private readonly keyCodec: Codec<K>,
     private readonly valueCodec: Codec<V>,
+    /** Rebinds a fresh session epoch after StaleSession; stable request
+     * identities make resubmits dedupe server-side. */
+    private readonly reopen?: () => Promise<WriterSessionClient>,
+    private lingerMs: number = DEFAULT_LINGER_MS,
+    private maxBatch: number = DEFAULT_MAX_BATCH_RECORDS,
   ) {}
 
   /** The session's fencing epoch. */
@@ -124,6 +164,26 @@ export class FeedWriter<K, V> {
       this.session.useCompression(enabled),
       this.keyCodec,
       this.valueCodec,
+      this.reopen,
+      this.lingerMs,
+      this.maxBatch,
+    );
+  }
+
+  /** Coalescing window in ms before the first `write` — mirrors the
+   * Java `.linger(Duration)` builder knob (default 5ms). */
+  linger(ms: number): FeedWriter<K, V> {
+    return new FeedWriter<K, V>(
+      this.session, this.keyCodec, this.valueCodec,
+      this.reopen, ms, this.maxBatch,
+    );
+  }
+
+  /** Cap one coalesced commit (default 256). */
+  maxBatchRecords(n: number): FeedWriter<K, V> {
+    return new FeedWriter<K, V>(
+      this.session, this.keyCodec, this.valueCodec,
+      this.reopen, this.lingerMs, n,
     );
   }
 
@@ -154,6 +214,130 @@ export class FeedWriter<K, V> {
       metadata: event.metadata,
     };
   }
+
+  /**
+   * The always-async write path: queues the record and returns a
+   * Promise resolving once the coalesced batch majority-commits —
+   * the `AppendResult` ack. `callback(result, error)` receives the
+   * same outcome. `append`/`appendAll` remain the manual forms.
+   */
+  write(key: K | null, value: V, callback?: WriteCallback<V>): Promise<AppendResult> {
+    return this.writeEvent({ key, value }, callback);
+  }
+
+  /** Queue one typed event for the coalescing sender — pin
+   * `requestId` for caller-driven retries (identical retries dedupe
+   * server-side). */
+  writeEvent(event: FeedEvent<K, V>, callback?: WriteCallback<V>): Promise<AppendResult> {
+    return new Promise<AppendResult>((resolve, reject) => {
+      if (this.closed) {
+        const error = new WhitewaterError(0, null, "whitewater: writer closed");
+        callback?.(null, error);
+        reject(error);
+        return;
+      }
+      // Pin the stable request identity at enqueue: resubmits after a
+      // StaleSession reopen carry the same id.
+      const input = this.wire({ ...event, requestId: event.requestId ?? randomUUID() });
+      this.writeQueue.push({ input, resolve, reject, callback: callback as WriteCallback<unknown> | undefined });
+      this.schedule();
+    });
+  }
+
+  /** Queued-not-yet-delivered writes — diagnostics only. */
+  get pending(): number {
+    return this.writeQueue.length;
+  }
+
+  /** Flush queued writes, deliver them, then stop the sender —
+   * writes queued before close still complete; later writes fail. */
+  async close(): Promise<void> {
+    this.closed = true;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    while (this.writeQueue.length > 0 || this.flushPromise) {
+      if (this.flushPromise) await this.flushPromise;
+      if (this.writeQueue.length > 0 && !this.flushPromise) {
+        await this.flush();
+      }
+    }
+  }
+
+  private schedule(): void {
+    if (this.flushPromise || this.flushTimer || this.closed) return;
+    if (this.writeQueue.length >= this.maxBatch) {
+      this.flushPromise = this.flush().finally(() => {
+        this.flushPromise = null;
+        if (this.writeQueue.length > 0) this.schedule();
+      });
+      return;
+    }
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flushPromise = this.flush().finally(() => {
+        this.flushPromise = null;
+        if (this.writeQueue.length > 0) this.schedule();
+      });
+    }, this.lingerMs);
+  }
+
+  /** Post one append-batch commit with the Java parity retry
+   * contract: StaleSession rebinds a fresh epoch and resubmits,
+   * Unavailable/AmbiguousResult retry bounded-ly, a definitive
+   * refusal fails the batch whole. */
+  private async flush(): Promise<void> {
+    const batch = this.writeQueue.splice(0, this.maxBatch);
+    if (batch.length === 0) return;
+    const inputs = batch.map((p) => p.input);
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < WRITE_MAX_ATTEMPTS; attempt++) {
+      try {
+        const outcome = await this.session.appendBatch(inputs);
+        if (outcome.results.length !== batch.length) {
+          lastError = new WhitewaterError(
+            0, null,
+            "whitewater: batch result did not cover every record",
+          );
+          break;
+        }
+        batch.forEach((p, i) => {
+          p.resolve(outcome.results[i]);
+          p.callback?.(outcome.results[i], null);
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (error instanceof StaleSession) {
+          try {
+            if (!this.reopen) throw error;
+            this.session = await this.reopen();
+          } catch (reopenError) {
+            lastError = reopenError;
+            if (attempt + 1 < WRITE_MAX_ATTEMPTS) {
+              await sleep(WRITE_RETRY_BACKOFF_MS);
+            }
+            continue;
+          }
+          continue;
+        }
+        if (error instanceof Unavailable || error instanceof AmbiguousResult) {
+          if (attempt + 1 < WRITE_MAX_ATTEMPTS) await sleep(WRITE_RETRY_BACKOFF_MS);
+          continue;
+        }
+        break;
+      }
+    }
+    for (const p of batch) {
+      p.reject(lastError);
+      p.callback?.(null, lastError);
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -363,16 +547,20 @@ export class Feed<K, V> {
         throw error;
       }
     }
-    const setup = await this.client.openWriterSession(writerName);
-    const epoch = (setup.results[0]?.data as { session_epoch?: number } | undefined)
-      ?.session_epoch;
-    if (typeof epoch !== "number" || epoch === 0) {
-      throw new Error(`open_writer_session returned no session_epoch for ${writerName}`);
-    }
+    const openSession = async (): Promise<WriterSessionClient> => {
+      const setup = await this.client.openWriterSession(writerName);
+      const epoch = (setup.results[0]?.data as { session_epoch?: number } | undefined)
+        ?.session_epoch;
+      if (typeof epoch !== "number" || epoch === 0) {
+        throw new Error(`open_writer_session returned no session_epoch for ${writerName}`);
+      }
+      return this.client.writer(writerName, epoch);
+    };
     return new FeedWriter<K, V>(
-      this.client.writer(writerName, epoch),
+      await openSession(),
       this.keyCodec,
       this.valueCodec,
+      openSession,
     );
   }
 

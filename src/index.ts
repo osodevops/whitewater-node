@@ -20,6 +20,7 @@ export type {
   FeedMessage,
   FeedPage,
   FeedReaderPage,
+  WriteCallback,
 } from "./feed.js";
 export {
   AbstractStoreKeySet,

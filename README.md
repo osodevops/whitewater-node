@@ -229,30 +229,48 @@ DLQ, idempotent outputs, counters — is
 ### Writing
 
 ```ts
-// Declares + opens the shop.ingest session; each append resolves after
-// majority commit (at least 2 of 3 Nodes):
+// Declares + opens the shop.ingest session — write() is the
+// always-async default: it queues the record and returns a Promise
+// resolving once the coalesced batch majority-commits (≥2 of 3 Nodes):
 const writer = await orders.writer("ingest");
-const appended = await writer.append("order-42", { id: "order-42", total: 99 });
+const appended = await writer.write("order-42", { id: "order-42", total: 99 });
 // appended: messageId, cursor, deduplicated, durability — the ack payload
+
+// Or take the callback — (result, error) once the commit lands:
+writer.write("order-43", { id: "order-43", total: 1 },
+             (result, error) => console.log(result?.messageId));
 
 // Idempotent events: pin requestId for caller-driven retries —
 // the same identity replays its committed result instead of writing twice.
-await writer.appendEvent({
+await writer.writeEvent({
   requestId: "a-stable-request-uuid",   // retry-safe identity
   key: "order-42",
   value: { id: "order-42", total: 99 },
   metadata: textMetadata({ source: "api" }),
 });
+```
 
-// One commit for a group of records:
+The sender coalesces queued writes into one `append-batch` commit —
+`writer.linger(ms)` (default 5ms) and `writer.maxBatchRecords(n)`
+(default 256) tune the batching, `writer.pending` reports
+queued-not-yet-delivered writes, and `await writer.close()` flushes
+everything queued before returning. Each record keeps its stable
+request id through retries, so a timed-out resubmit deduplicates
+server-side. `append`/`appendEvent`/`appendAll` remain as the manual
+forms:
+
+```ts
+// One commit per call, resolves directly to the ack:
+const appended = await writer.append("order-42", { id: "order-42", total: 99 });
+
+// One explicit commit for a group of records:
 await writer.appendAll([{ requestId: rid, key: "o2", value: order2 }]);
 ```
 
-Every append carries an idempotent `requestId` — retrying a timed-out
-append with the same identity deduplicates; reusing it with different
-contents is refused. Writers are epoch-fenced sessions: a second writer
-claiming `ingest` fences the first, so an ambiguous timeout can never
-double-commit under retry. `useCompression` opts into LZ4; record
+Writers are epoch-fenced sessions: a second writer claiming `ingest`
+fences the first, and the sender reopens automatically — resubmitted
+records still carry their original request id, so an ambiguous timeout
+can never double-commit. `useCompression` opts into LZ4; record
 `eventTimeNs`/`ingestTimeNs` are `bigint` — the full signed 64-bit
 nanosecond range round-trips exactly (never imprecise JS numbers).
 
@@ -474,7 +492,8 @@ escape hatches for the same wire contract.
 | `records` `fetch` `load(start, sink)` | limit, cursor, `ReaderStart` | Committed history reads |
 | `writer` `reader` `subscribe` `subscribeDecoded` `consumer` | name, options | Bound sessions + loops |
 | **Writing** | | |
-| `FeedWriter.append(k, v)` `appendEvent` `appendAll` | key, value, `FeedEvent` | Write resolving on majority commit — `AppendResult` |
+| `FeedWriter.write(k, v)` `writeEvent` | key, value, `FeedEvent`, `callback` | Always-async write — `Promise<AppendResult>`, ack on majority commit; sender coalesces into batches (`linger`, `maxBatchRecords`, `pending`, `close`) |
+| `FeedWriter.append(k, v)` `appendEvent` `appendAll` | key, value, `FeedEvent` | Manual write resolving on majority commit — `AppendResult` |
 | `sessionEpoch` `useCompression` | — | Session + lifecycle |
 | **Reading** | | |
 | `FeedReader.fetch(limit)` `ack()` `ackCursor` `close()` `sessionEpoch` | page bound, cursor | Manual durable-Reader loop |

@@ -236,8 +236,6 @@ export class FeedWriter<K, V> {
         reject(error);
         return;
       }
-      // Pin the stable request identity at enqueue: resubmits after a
-      // StaleSession reopen carry the same id.
       const input = this.wire({ ...event, requestId: event.requestId ?? randomUUID() });
       this.writeQueue.push({ input, resolve, reject, callback: callback as WriteCallback<unknown> | undefined });
       this.schedule();
@@ -288,7 +286,18 @@ export class FeedWriter<K, V> {
    * Unavailable/AmbiguousResult retry bounded-ly, a definitive
    * refusal fails the batch whole. */
   private async flush(): Promise<void> {
-    const batch = this.writeQueue.splice(0, this.maxBatch);
+    const rawBatch = this.writeQueue.splice(0, this.maxBatch);
+    if (rawBatch.length === 0) return;
+    const batch: PendingWrite[] = [];
+    for (const p of rawBatch) {
+      try {
+        await this.session.validateWrite(p.input.key, p.input.payload);
+        batch.push(p);
+      } catch (err) {
+        p.reject(err);
+        p.callback?.(null, err);
+      }
+    }
     if (batch.length === 0) return;
     const inputs = batch.map((p) => p.input);
     let lastError: unknown = null;

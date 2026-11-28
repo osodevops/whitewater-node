@@ -30,6 +30,14 @@ export class LeaseConflict extends Conflict {}
 export class Unavailable extends WhitewaterError {}
 /** The operation may or may not have committed (5xx, timeout). */
 export class AmbiguousResult extends WhitewaterError {}
+/** Client-side schema definition, compatibility, or payload validation failed. */
+export class SchemaValidation extends WhitewaterError {
+  readonly violations: string[];
+  constructor(message: string, violations: string[] = [message]) {
+    super(422, "schema.validation_failed", message);
+    this.violations = [...violations];
+  }
+}
 
 const LEASE_CODES = new Set(["lease.busy", "lease.stale_lease", "lease.capacity"]);
 

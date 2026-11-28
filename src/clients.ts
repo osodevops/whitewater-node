@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { codecs, type Codec } from "./codecs.js";
 import { asFeed, Domain, feedSchemaToWire, ReaderBuilder, WriterBuilder, type FeedSchema } from "./domain.js";
-import { AmbiguousResult, Conflict, Unavailable, WhitewaterError } from "./errors.js";
+import { AmbiguousResult, Conflict, Refused, Unavailable, WhitewaterError } from "./errors.js";
 import { Feed } from "./feed.js";
 import {
   decodeDemandReport,
@@ -77,8 +77,16 @@ export class WriterSessionClient {
     return new WriterSessionClient(this.transport, this.writer, this.sessionEpoch, enabled);
   }
 
+  async validateWrite(key: Buffer | null | undefined, payload: Buffer): Promise<void> {
+    const feed = this.transport.schemaRegistry?.feedForWriter(this.writer);
+    if (feed) {
+      await this.transport.schemaRegistry.validateResourceWrite(feed, key ?? null, payload);
+    }
+  }
+
   /** Idempotent single append; same requestId dedups on the server. */
   async append(input: AppendInput): Promise<AppendResult> {
+    await this.validateWrite(input.key, input.payload);
     const body = wire.appendRequest(
       input.requestId ?? randomUUID(),
       this.writer,
@@ -93,6 +101,9 @@ export class WriterSessionClient {
   }
 
   async appendBatch(records: AppendInput[]): Promise<AppendBatchResult> {
+    for (const r of records) {
+      await this.validateWrite(r.key, r.payload);
+    }
     const body = {
       records: records.map((r) =>
         wire.appendRequest(
@@ -314,6 +325,7 @@ export class FeedClient {
 
   /** Ad-hoc append; identical `requestId` retries dedupe. */
   async append(feed: string, record: FeedAppend): Promise<AppendResult> {
+    await this.transport.schemaRegistry?.validateResourceWrite(feed, record.key ?? null, record.payload);
     const body = wire.feedAppendRequest(feed, record);
     if (this.compression) body.use_compression = true;
     return wire.appendResult(await this.transport.post("/v1/feeds/append", body));
@@ -746,7 +758,10 @@ export class WhitewaterClient {
     if (nameOrDomain instanceof Domain) {
       return new WriterBuilder<K, V>(this, nameOrDomain, asFeed(nameOrDomain, feed));
     }
-    return this.wcl(`CREATE WRITER ${resource(nameOrDomain)} TO ${dotted(feed as string)}`);
+    const rName = resource(nameOrDomain);
+    const fName = dotted(feed as string);
+    this.transport.schemaRegistry.registerWriterFeed(rName, fName);
+    return this.wcl(`CREATE WRITER ${rName} TO ${fName}`);
   }
 
   /** @internal — `CREATE READER`; use {@link Domain.createReader}
@@ -1012,6 +1027,88 @@ export class WhitewaterClient {
   stateStore(name: string): StateStore {
     return StateStore.bound(this.transport, name);
   }
+
+  get schemas() {
+    return this.transport.schemaRegistry;
+  }
+
+  updateSchema(
+    resourceName: string,
+    definition: string,
+    target: import("./schema-registry.js").SchemaTarget,
+    type: import("./schema-registry.js").SchemaType,
+    compatibility?: import("./schema-registry.js").SchemaCompatibility,
+  ) {
+    return this.transport.schemaRegistry.updateSchema(
+      resourceName,
+      definition,
+      target,
+      type,
+      compatibility,
+    );
+  }
+
+  getSchema(resourceName: string, target: import("./schema-registry.js").SchemaTarget) {
+    return this.transport.schemaRegistry.getSchema(resourceName, target);
+  }
+
+  listSchemas() {
+    return this.transport.schemaRegistry.listSchemas();
+  }
+
+  checkSchemaCompatibility(
+    resourceName: string,
+    definition: string,
+    target: import("./schema-registry.js").SchemaTarget,
+    type: import("./schema-registry.js").SchemaType,
+  ) {
+    return this.transport.schemaRegistry.checkCompatibility(resourceName, definition, target, type);
+  }
+
+  updateSchemaCompatibility(
+    resourceName: string,
+    target: import("./schema-registry.js").SchemaTarget,
+    compatibility: import("./schema-registry.js").SchemaCompatibility,
+  ) {
+    return this.transport.schemaRegistry.updateCompatibility(resourceName, target, compatibility);
+  }
+
+  linkSchema(
+    sourceResource: string,
+    sourceTarget: import("./schema-registry.js").SchemaTarget,
+    linkedResource: string,
+    linkedTarget: import("./schema-registry.js").SchemaTarget,
+  ) {
+    return this.transport.schemaRegistry.linkSchema(sourceResource, sourceTarget, linkedResource, linkedTarget);
+  }
+
+  unlinkSchema(
+    sourceResource: string,
+    sourceTarget: import("./schema-registry.js").SchemaTarget,
+    linkedResource: string,
+    linkedTarget: import("./schema-registry.js").SchemaTarget,
+  ) {
+    return this.transport.schemaRegistry.unlinkSchema(sourceResource, sourceTarget, linkedResource, linkedTarget);
+  }
+
+  async replicateSchemaTo(
+    targetClient: WhitewaterClient,
+    sourceCluster: string,
+    resourceName: string,
+    target: import("./schema-registry.js").SchemaTarget,
+  ) {
+    const entry = await this.getSchema(resourceName, target);
+    if (!entry) throw new Refused(404, "schema.not_found", `Schema not found for ${resourceName}|${target}`);
+    return targetClient.schemas.replicateEntry(entry, sourceCluster);
+  }
+
+  removeSchema(resourceName: string, target: import("./schema-registry.js").SchemaTarget) {
+    return this.transport.schemaRegistry.removeSchema(resourceName, target);
+  }
+
+  refreshSchemas(): void {
+    this.transport.schemaRegistry.refreshCache();
+  }
 }
 
 /**
@@ -1066,6 +1163,9 @@ export class StateStore {
 
   /** @internal */
   static bound(transport: Transport, name: string): StateStore {
+    if (transport.schemaRegistry && (name.trim().toLowerCase() === "whitewater.schema.registry" || name.trim().toLowerCase() === "schema.registry" || name.trim().toLowerCase() === "schema-registry")) {
+      throw new Error("whitewater.schema.registry is an internal schema registry store; use updateSchema / getSchema / listSchemas");
+    }
     return new StateStore(transport, dotted(name));
   }
 
@@ -1159,10 +1259,13 @@ export class StateStore {
     } else {
       record = named;
     }
+    const kBuf = keyBytes(key);
+    const pBuf = keyBytes(payload);
+    await this.boundTransport().schemaRegistry?.validateResourceWrite(this.name, kBuf, pBuf);
     const op: Record<string, unknown> = {
       kind: "put_row",
-      key_base64: keyBytes(key).toString("base64"),
-      payload_base64: keyBytes(payload).toString("base64"),
+      key_base64: kBuf.toString("base64"),
+      payload_base64: pBuf.toString("base64"),
     };
     if (record && Object.keys(record).length > 0) op.named = wire.namedValues(record);
     return wire.mutationResult(
@@ -1294,6 +1397,9 @@ export class StateStoresClient {
   async define(spec: StateStore, source?: string, requestId?: string): Promise<StateStore> {
     if (!(spec instanceof StateStore)) {
       throw new Error("define() takes a StateStore spec — use StateStore.named(name)");
+    }
+    if (spec.name.toLowerCase() === "whitewater.schema.registry" || spec.name.toLowerCase() === "schema.registry") {
+      throw new Error("whitewater.schema.registry is an internal schema registry store and cannot be registered directly");
     }
     if (!source && spec.namedKeys.some((k) => k.extractor !== undefined)) {
       throw new Error(

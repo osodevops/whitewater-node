@@ -59,10 +59,24 @@ export {
   Conflict,
   LeaseConflict,
   Refused,
+  SchemaValidation,
   StaleSession,
   Unavailable,
   WhitewaterError,
 } from "./errors.js";
+export {
+  SCHEMA_STORE_DOMAIN,
+  SCHEMA_STORE_NAME,
+  SchemaCompatibility,
+  SchemaRegistry,
+  SchemaTarget,
+  SchemaType,
+} from "./schema-registry.js";
+export type {
+  SchemaCompatibilityResult,
+  SchemaEntry,
+  SchemaVersion,
+} from "./schema-registry.js";
 export { createFakeRiverbed, FakeRiverbed } from "./testing.js";
 export type { FakeRiverbedOptions } from "./testing.js";
 export { Cursor, Extractor, MAX_NAMED_KEYS, ReaderStart } from "./models.js";

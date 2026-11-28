@@ -6,9 +6,11 @@
  */
 
 import { mapError, Unavailable } from "./errors.js";
+import { SchemaRegistry } from "./schema-registry.js";
 
 export class Transport {
   private next = 0;
+  readonly schemaRegistry = new SchemaRegistry(this);
 
   constructor(
     private readonly endpoints: string[],
